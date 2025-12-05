@@ -26,6 +26,12 @@ impl PythonClassifier {
     }
 }
 
+impl Default for PythonClassifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Classifier for PythonClassifier {
     fn is_noise(&mut self, line: &str) -> bool {
         let trimmed = line.trim();
@@ -95,6 +101,12 @@ pub struct CStyleClassifier {
 impl CStyleClassifier {
     pub fn new() -> Self {
         Self { in_block: false }
+    }
+}
+
+impl Default for CStyleClassifier {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -174,6 +186,12 @@ pub struct RubyClassifier {
 impl RubyClassifier {
     pub fn new() -> Self {
         Self { in_block: false }
+    }
+}
+
+impl Default for RubyClassifier {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

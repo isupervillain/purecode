@@ -1,37 +1,13 @@
 use crate::classifier::get_classifier;
+use crate::detect_language;
 use crate::stats::LangStats;
 use std::collections::HashMap;
 
-pub fn detect_language(path: &str) -> String {
-    let extension = std::path::Path::new(path)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("");
-
-    match extension {
-        "py" => "Python",
-        "ts" | "tsx" => "TypeScript",
-        "js" | "jsx" => "JavaScript",
-        "c" | "h" => "C",
-        "cpp" | "cc" | "hpp" | "hh" => "C++",
-        "cs" => "C#",
-        "java" => "Java",
-        "go" => "Go",
-        "swift" => "Swift",
-        "kt" | "kts" => "Kotlin",
-        "php" => "PHP",
-        "scala" => "Scala",
-        "rb" => "Ruby",
-        "sh" | "bash" | "zsh" => "Shell",
-        "ps1" => "PowerShell",
-        "css" | "scss" => "CSS",
-        "html" | "htm" => "HTML",
-        "vue" => "Vue",
-        _ => "Other",
-    }
-    .to_string()
-}
-
+/// Parses a unified diff from the reader and updates statistics.
+///
+/// This function reads the diff line by line, detects file changes and languages,
+/// uses classifiers to determine if lines are pure code or noise, and aggregates
+/// the results into the provided `stats` map.
 pub fn parse_diff<R: std::io::BufRead>(
     reader: R,
     stats: &mut HashMap<String, LangStats>,
@@ -43,33 +19,17 @@ pub fn parse_diff<R: std::io::BufRead>(
         let line = line_result?;
 
         if line.starts_with("+++ ") {
-            // Parse file path: "+++ b/path/to/file.ext"
-            // Or "+++ /dev/null"
             let path_part = line.trim_start_matches("+++ ").trim();
 
             if path_part == "/dev/null" || path_part.ends_with("/dev/null") {
-                // File deleted. We still process the "-" lines (which appeared before usually? or in this hunk?)
-                // Actually in unified diff:
-                // --- a/file
-                // +++ /dev/null
-                // @@ ... @@
-                // - content
-
-                // If we see +++ /dev/null, it means we are in the hunk for a deleted file.
-                // We should have seen --- a/file before.
-                // Wait, usually --- comes first.
-                // If we rely on +++ to set the language, and it is /dev/null, we might lose the language info from ---.
-                // Strategy:
-                // If line starts with "--- ", try to extract lang.
-                // If line starts with "+++ ", override lang unless it is /dev/null.
                 continue;
             }
 
             // Strip prefix a/ or b/
-            let clean_path = if path_part.starts_with("b/") {
-                &path_part[2..]
-            } else if path_part.starts_with("a/") {
-                &path_part[2..]
+            let clean_path = if let Some(stripped) = path_part.strip_prefix("b/") {
+                stripped
+            } else if let Some(stripped) = path_part.strip_prefix("a/") {
+                stripped
             } else {
                 path_part
             };
@@ -82,10 +42,10 @@ pub fn parse_diff<R: std::io::BufRead>(
         if line.starts_with("--- ") {
             let path_part = line.trim_start_matches("--- ").trim();
             if path_part != "/dev/null" && !path_part.ends_with("/dev/null") {
-                let clean_path = if path_part.starts_with("a/") {
-                    &path_part[2..]
-                } else if path_part.starts_with("b/") {
-                    &path_part[2..]
+                let clean_path = if let Some(stripped) = path_part.strip_prefix("a/") {
+                    stripped
+                } else if let Some(stripped) = path_part.strip_prefix("b/") {
+                    stripped
                 } else {
                     path_part
                 };

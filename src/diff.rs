@@ -3,7 +3,12 @@ use std::process::{Command, Stdio};
 
 pub fn get_git_diff(base: &str, head: &str) -> io::Result<Box<dyn std::io::BufRead>> {
     let output = Command::new("git")
-        .args(["diff", &format!("{}...{}", base, head), "--unified=0", "--no-color"])
+        .args([
+            "diff",
+            &format!("{}...{}", base, head),
+            "--unified=0",
+            "--no-color",
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -12,10 +17,7 @@ pub fn get_git_diff(base: &str, head: &str) -> io::Result<Box<dyn std::io::BufRe
 
     if !output.status.success() {
         let err_msg = String::from_utf8_lossy(&output.stderr);
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("git diff failed: {}", err_msg),
-        ));
+        return Err(io::Error::other(format!("git diff failed: {}", err_msg)));
     }
 
     let cursor = std::io::Cursor::new(output.stdout);

@@ -1,10 +1,5 @@
-mod classifier;
-mod diff;
-mod parser;
-mod report;
-mod stats;
-
 use clap::Parser;
+use purecode::{diff, parser, report};
 use std::collections::HashMap;
 use std::process::exit;
 
