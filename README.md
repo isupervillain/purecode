@@ -23,6 +23,28 @@
 
 ## Installation
 
+### From GitHub Releases (Recommended)
+
+Download the pre-compiled binary for your platform from the [Releases page](https://github.com/yourusername/purecode/releases).
+
+1. Download the archive for your OS (Linux, Windows, or macOS).
+2. Extract the archive.
+3. Move the binary to a directory in your PATH (e.g., `/usr/local/bin`).
+
+**Linux/macOS example:**
+
+```bash
+# Download (replace VERSION and PLATFORM)
+wget https://github.com/yourusername/purecode/releases/download/v0.1.0/purecode-linux-amd64.tar.gz
+
+# Extract
+tar -xvf purecode-linux-amd64.tar.gz
+
+# Install
+chmod +x purecode
+sudo mv purecode /usr/local/bin/
+```
+
 ### From Source
 
 Ensure you have Rust installed (version 1.70+ recommended).
@@ -32,10 +54,6 @@ git clone https://github.com/yourusername/purecode.git
 cd purecode
 cargo install --path .
 ```
-
-### From CI Artifacts
-
-If you are reviewing a PR in this repo, you can download the pre-built binary for your OS from the "Artifacts" section of the GitHub Actions run.
 
 ## Usage
 
