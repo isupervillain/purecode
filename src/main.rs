@@ -6,7 +6,7 @@ use std::process::exit;
 #[derive(Parser, Debug)]
 #[command(name = "purecode")]
 #[command(author = "PureCode Author")]
-#[command(version = "0.2.0")]
+#[command(version = "0.3.0")]
 #[command(about = "Analyzes git diffs to count pure code vs noise", long_about = None)]
 struct Cli {
     /// Base ref for git diff
