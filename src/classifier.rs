@@ -1,14 +1,26 @@
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum LineType {
+    Pure,
+    Comment,
+    Docstring,
+    Blank,
+}
+
 pub trait Classifier {
-    /// Returns true if the line is considered "noise" (comment, docstring, or blank).
+    /// Classifies the line as Pure, Comment, Docstring, or Blank.
     /// This method is stateful for multi-line comments.
-    fn is_noise(&mut self, line: &str) -> bool;
+    fn classify(&mut self, line: &str) -> LineType;
 }
 
 pub struct DefaultClassifier;
 
 impl Classifier for DefaultClassifier {
-    fn is_noise(&mut self, line: &str) -> bool {
-        line.trim().is_empty()
+    fn classify(&mut self, line: &str) -> LineType {
+        if line.trim().is_empty() {
+            LineType::Blank
+        } else {
+            LineType::Pure
+        }
     }
 }
 
@@ -33,64 +45,55 @@ impl Default for PythonClassifier {
 }
 
 impl Classifier for PythonClassifier {
-    fn is_noise(&mut self, line: &str) -> bool {
+    fn classify(&mut self, line: &str) -> LineType {
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            return true;
+            return LineType::Blank;
         }
 
-        // If we are currently inside a triple-quote block, everything is noise
-        // until we find the closing triple-quote.
+        // If we are currently inside a triple-quote block
         if self.in_triple_double {
             if trimmed.contains("\"\"\"") {
-                // Potential end of block.
-                // Naive check: if it contains the closer, we toggle off.
-                // Real python parsing is harder (e.g. string literals),
-                // but for diff stats this is usually sufficient.
-                // We assume the closer is on this line.
                 self.in_triple_double = false;
             }
-            return true;
+            return LineType::Docstring;
         }
         if self.in_triple_single {
             if trimmed.contains("'''") {
                 self.in_triple_single = false;
             }
-            return true;
+            return LineType::Docstring;
         }
 
         // Check for comments
         if trimmed.starts_with('#') {
-            return true;
+            return LineType::Comment;
         }
 
         // Check for start of docstrings
         if trimmed.starts_with("\"\"\"") {
-            // Check if it opens and closes on the same line
-            // e.g. """ doc """
-            // Count occurrences.
             let count = line.matches("\"\"\"").count();
             if count >= 2 {
-                // Open and close on same line -> it's a one-line docstring -> noise
-                return true;
+                // Open and close on same line -> one-line docstring
+                return LineType::Docstring;
             } else {
                 // Open, but not close -> enter state
                 self.in_triple_double = true;
-                return true;
+                return LineType::Docstring;
             }
         }
 
         if trimmed.starts_with("'''") {
             let count = line.matches("'''").count();
             if count >= 2 {
-                return true;
+                return LineType::Docstring;
             } else {
                 self.in_triple_single = true;
-                return true;
+                return LineType::Docstring;
             }
         }
 
-        false
+        LineType::Pure
     }
 }
 
@@ -111,71 +114,56 @@ impl Default for CStyleClassifier {
 }
 
 impl Classifier for CStyleClassifier {
-    fn is_noise(&mut self, line: &str) -> bool {
+    fn classify(&mut self, line: &str) -> LineType {
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            return true;
+            return LineType::Blank;
         }
 
         if self.in_block {
             if trimmed.contains("*/") {
                 self.in_block = false;
             }
-            return true;
+            return LineType::Comment;
         }
 
         if trimmed.starts_with("//") {
-            return true;
+            return LineType::Comment;
         }
 
         // Check for Javadoc style continuations
         if trimmed.starts_with('*') {
-            // This is risky for pointer dereferences in C/C++, e.g. *ptr = val;
-            // But the spec says: "start with `*` (Javadoc-style continuation inside comment blocks)"
-            // Usually Javadoc continuation happens *inside* a block.
-            // But if we missed the start of the block (diff context issue), this rule helps catch the middle.
-            // However, strictly following the prompt:
-            // "Ignore lines that are: ... start with `*` (Javadoc-style continuation inside comment blocks)"
-            // It implies we should treat lines starting with * as noise.
-            // NOTE: This will produce false positives for pointer dereferences at start of line.
-            // But for a "pure code" tool, minimizing noise is often prioritized, or it assumes consistent formatting.
-            // We'll follow the spec.
-            return true;
+            return LineType::Comment;
         }
 
         if let Some(start_idx) = trimmed.find("/*") {
-            // If `/*` is found.
-            // Check if `*/` is after `/*`.
             if let Some(end_idx) = trimmed.find("*/") {
                 if end_idx > start_idx {
-                    // Ends on same line. Treat as noise.
-                    // Note: If there is code before `/*`, strictly speaking the line has code.
-                    // The prompt says: "Ignore lines that are: ... inside /* ... */ comment blocks".
-                    // And "When seeing /*: If a matching */ exists on the same line... treat the entire line as comment."
-                    // This implies strict line-based classification. Even `int x = 1; /* comment */` might be classified as noise
-                    // if we aren't careful?
-                    // "Ignore lines that are ... inside /* ... */".
-                    // "When seeing /*: If a matching */ exists on the same line ... treat the entire line as comment."
-                    // This is aggressive. It means `code(); /* comment */` is counted as noise.
-                    // I will follow this aggressive spec as requested ("treat the entire line as comment").
-                    return true;
+                    // Ends on same line.
+                    return LineType::Comment;
                 }
             }
             // Starts block, doesn't end.
             self.in_block = true;
-            return true;
+            return LineType::Comment;
         }
 
-        false
+        LineType::Pure
     }
 }
 
 pub struct ShellClassifier;
 
 impl Classifier for ShellClassifier {
-    fn is_noise(&mut self, line: &str) -> bool {
+    fn classify(&mut self, line: &str) -> LineType {
         let trimmed = line.trim();
-        trimmed.is_empty() || trimmed.starts_with('#')
+        if trimmed.is_empty() {
+            LineType::Blank
+        } else if trimmed.starts_with('#') {
+            LineType::Comment
+        } else {
+            LineType::Pure
+        }
     }
 }
 
@@ -196,29 +184,29 @@ impl Default for RubyClassifier {
 }
 
 impl Classifier for RubyClassifier {
-    fn is_noise(&mut self, line: &str) -> bool {
+    fn classify(&mut self, line: &str) -> LineType {
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            return true;
+            return LineType::Blank;
         }
 
         if self.in_block {
             if trimmed.starts_with("=end") {
                 self.in_block = false;
             }
-            return true;
+            return LineType::Comment;
         }
 
         if trimmed.starts_with('#') {
-            return true;
+            return LineType::Comment;
         }
 
         if trimmed.starts_with("=begin") {
             self.in_block = true;
-            return true;
+            return LineType::Comment;
         }
 
-        false
+        LineType::Pure
     }
 }
 
@@ -240,49 +228,49 @@ mod tests {
     #[test]
     fn test_python_classifier() {
         let mut c = PythonClassifier::new();
-        assert!(!c.is_noise("x = 1"));
-        assert!(c.is_noise("# comment"));
-        assert!(c.is_noise("   "));
+        assert_eq!(c.classify("x = 1"), LineType::Pure);
+        assert_eq!(c.classify("# comment"), LineType::Comment);
+        assert_eq!(c.classify("   "), LineType::Blank);
 
-        // Multiline
-        assert!(c.is_noise("\"\"\"")); // Start block
-        assert!(c.is_noise("docs")); // Inside
-        assert!(c.is_noise("\"\"\"")); // End block
-        assert!(!c.is_noise("x = 2"));
+        // Multiline docstring
+        assert_eq!(c.classify("\"\"\""), LineType::Docstring); // Start block
+        assert_eq!(c.classify("docs"), LineType::Docstring); // Inside
+        assert_eq!(c.classify("\"\"\""), LineType::Docstring); // End block
+        assert_eq!(c.classify("x = 2"), LineType::Pure);
 
         // One-liner
-        assert!(c.is_noise("\"\"\" one line docs \"\"\""));
-        assert!(!c.is_noise("y = 2"));
+        assert_eq!(c.classify("\"\"\" one line docs \"\"\""), LineType::Docstring);
+        assert_eq!(c.classify("y = 2"), LineType::Pure);
     }
 
     #[test]
     fn test_cstyle_classifier() {
         let mut c = CStyleClassifier::new();
-        assert!(!c.is_noise("int x = 1;"));
-        assert!(c.is_noise("// comment"));
-        assert!(c.is_noise("   "));
+        assert_eq!(c.classify("int x = 1;"), LineType::Pure);
+        assert_eq!(c.classify("// comment"), LineType::Comment);
+        assert_eq!(c.classify("   "), LineType::Blank);
 
         // Multiline
-        assert!(c.is_noise("/*"));
-        assert!(c.is_noise(" * inside"));
-        assert!(c.is_noise("*/"));
-        assert!(!c.is_noise("x = 2;"));
+        assert_eq!(c.classify("/*"), LineType::Comment);
+        assert_eq!(c.classify(" * inside"), LineType::Comment);
+        assert_eq!(c.classify("*/"), LineType::Comment);
+        assert_eq!(c.classify("x = 2;"), LineType::Pure);
 
         // One-liner
-        assert!(c.is_noise("/* comment */"));
-        // Spec edge case: code with comment on same line is treated as comment
-        assert!(c.is_noise("code(); /* comment */"));
+        assert_eq!(c.classify("/* comment */"), LineType::Comment);
+        assert_eq!(c.classify("code(); /* comment */"), LineType::Comment);
     }
 
     #[test]
     fn test_ruby_classifier() {
         let mut c = RubyClassifier::new();
-        assert!(!c.is_noise("x = 1"));
-        assert!(c.is_noise("# comment"));
+        assert_eq!(c.classify("x = 1"), LineType::Pure);
+        assert_eq!(c.classify("# comment"), LineType::Comment);
+        assert_eq!(c.classify(""), LineType::Blank);
 
-        assert!(c.is_noise("=begin"));
-        assert!(c.is_noise("docs"));
-        assert!(c.is_noise("=end"));
-        assert!(!c.is_noise("y = 2"));
+        assert_eq!(c.classify("=begin"), LineType::Comment);
+        assert_eq!(c.classify("docs"), LineType::Comment);
+        assert_eq!(c.classify("=end"), LineType::Comment);
+        assert_eq!(c.classify("y = 2"), LineType::Pure);
     }
 }

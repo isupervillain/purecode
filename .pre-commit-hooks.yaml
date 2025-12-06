@@ -1,0 +1,7 @@
+- id: purecode
+  name: purecode
+  entry: purecode
+  language: system
+  pass_filenames: false
+  stages: [commit-msg, pre-commit]
+  args: ["--stdin"]

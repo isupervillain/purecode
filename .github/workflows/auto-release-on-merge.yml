@@ -54,19 +54,23 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: purecode
-            asset_name: purecode-linux-amd64.tar.gz
+            asset_name: purecode-x86_64-unknown-linux-gnu.tar.gz
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact_name: purecode
+            asset_name: purecode-x86_64-unknown-linux-musl.tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: purecode.exe
-            asset_name: purecode-windows-amd64.zip
+            asset_name: purecode-x86_64-pc-windows-msvc.zip
           - os: macos-13
             target: x86_64-apple-darwin
             artifact_name: purecode
-            asset_name: purecode-macos-amd64.tar.gz
+            asset_name: purecode-x86_64-apple-darwin.tar.gz
           - os: macos-14
             target: aarch64-apple-darwin
             artifact_name: purecode
-            asset_name: purecode-macos-arm64.tar.gz
+            asset_name: purecode-aarch64-apple-darwin.tar.gz
 
     steps:
       - name: Checkout Code
@@ -79,6 +83,12 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
+
+      - name: Install musl-tools (Linux musl)
+        if: contains(matrix.target, 'musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
 
       - name: Build Release
         run: cargo build --release --target ${{ matrix.target }}

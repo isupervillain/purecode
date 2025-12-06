@@ -1,4 +1,4 @@
-use crate::classifier::get_classifier;
+use crate::classifier::{get_classifier, LineType};
 use crate::detect_language;
 use crate::stats::LangStats;
 use std::collections::HashMap;
@@ -74,19 +74,37 @@ pub fn parse_diff<R: std::io::BufRead>(
             let content = &line[1..];
             let stat = stats.entry(current_lang.clone()).or_default();
             stat.total_added += 1;
-            if !classifier.is_noise(content) {
-                stat.pure_added += 1;
+
+            match classifier.classify(content) {
+                LineType::Pure => {
+                    stat.pure_added += 1;
+                    stat.code_words_added += count_words(content) as i64;
+                },
+                LineType::Comment => stat.comment_lines_added += 1,
+                LineType::Docstring => stat.docstring_lines_added += 1,
+                LineType::Blank => stat.blank_lines_added += 1,
             }
         } else if line.starts_with('-') && !line.starts_with("---") {
             let content = &line[1..];
             let stat = stats.entry(current_lang.clone()).or_default();
             stat.total_removed += 1;
-            if !classifier.is_noise(content) {
-                stat.pure_removed += 1;
+
+            match classifier.classify(content) {
+                LineType::Pure => {
+                    stat.pure_removed += 1;
+                    stat.code_words_removed += count_words(content) as i64;
+                },
+                LineType::Comment => stat.comment_lines_removed += 1,
+                LineType::Docstring => stat.docstring_lines_removed += 1,
+                LineType::Blank => stat.blank_lines_removed += 1,
             }
         }
     }
     Ok(())
+}
+
+fn count_words(line: &str) -> usize {
+    line.split_whitespace().count()
 }
 
 #[cfg(test)]
@@ -121,5 +139,16 @@ index 123..456 100644
         // Pure Added: "def bar():", "    pass" (2)
         assert_eq!(py_stats.pure_removed, 1);
         assert_eq!(py_stats.pure_added, 2);
+
+        // Words
+        // "def foo():" -> 2 words
+        // "def bar():" -> 2 words
+        // "    pass"   -> 1 word
+        assert_eq!(py_stats.code_words_removed, 2);
+        assert_eq!(py_stats.code_words_added, 3);
+
+        // Comments
+        assert_eq!(py_stats.comment_lines_removed, 1);
+        assert_eq!(py_stats.comment_lines_added, 0);
     }
 }
