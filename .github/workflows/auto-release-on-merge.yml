@@ -1,0 +1,105 @@
+name: Auto Release on Merge
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write
+
+jobs:
+  prepare_release:
+    if: github.event.pull_request.merged == true
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.get_version.outputs.version_tag }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Get Version from Cargo.toml
+        id: get_version
+        run: |
+          VERSION=$(grep -m1 'version =' Cargo.toml | cut -d '"' -f 2)
+          echo "Found version: $VERSION"
+          echo "version_tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check and Create Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.get_version.outputs.version_tag }}
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "Error: Release $TAG already exists."
+            exit 1
+          else
+            echo "Creating release $TAG for commit $SHA"
+            gh release create "$TAG" --target "$SHA" --generate-notes
+          fi
+
+  build_and_upload:
+    needs: prepare_release
+    name: Build and Upload Assets
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: purecode
+            asset_name: purecode-linux-amd64.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: purecode.exe
+            asset_name: purecode-windows-amd64.zip
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact_name: purecode
+            asset_name: purecode-macos-amd64.tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact_name: purecode
+            asset_name: purecode-macos-arm64.tar.gz
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Build Release
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar -czf ../../../${{ matrix.asset_name }} ${{ matrix.artifact_name }}
+          cd -
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../${{ matrix.asset_name }} ${{ matrix.artifact_name }}
+          cd -
+
+      - name: Upload Release Asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare_release.outputs.release_tag }}
+        run: |
+          gh release upload "$TAG" "${{ matrix.asset_name }}"
