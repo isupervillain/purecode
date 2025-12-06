@@ -6,54 +6,57 @@
 
 - **Language-Aware Analysis**: Automatically detects languages and applies specific rules for identifying comments and code.
 - **Pure Code Metrics**: Calculates `TOTAL` lines changed and `PURE` lines changed (excluding noise).
+- **Rich Stats**: Tracks added/removed words, estimated tokens, and breaks down comments vs docstrings.
 - **Flexible Input**:
   - Run directly on git repositories (comparing branches/commits).
   - Pipe unified diffs via stdin (ideal for pre-commit hooks and CI).
-- **Single Binary**: Easy to distribute and install.
+- **Thresholds**: Gate CI pipelines by enforcing maximum noise ratios or minimum pure code requirements.
 - **Fast**: Built in Rust for high performance.
+- **Multiple Formats**: Output Human-readable (colorful), Plain text, or JSON.
 
 ## Supported Languages
 
 `purecode` supports detecting and classifying code for:
-- Python
+- Python (distinguishes Docstrings vs Comments)
 - C-style languages (C, C++, Java, C#, JS, TS, Go, PHP, Swift, Kotlin, Scala)
 - Shell / PowerShell
 - Ruby
 - HTML, CSS, Vue (basic support)
 
-## Installation
+## Quickstart
 
-### From GitHub Releases (Recommended)
-
-Download the pre-compiled binary for your platform from the [Releases page](https://github.com/yourusername/purecode/releases).
-
-1. Download the archive for your OS (Linux, Windows, or macOS).
-2. Extract the archive.
-3. Move the binary to a directory in your PATH (e.g., `/usr/local/bin`).
-
-**Linux/macOS example:**
+Install with a single command (macOS / Linux):
 
 ```bash
-# Download (replace VERSION and PLATFORM)
-wget https://github.com/yourusername/purecode/releases/download/v0.1.0/purecode-linux-amd64.tar.gz
-
-# Extract
-tar -xvf purecode-linux-amd64.tar.gz
-
-# Install
-chmod +x purecode
-sudo mv purecode /usr/local/bin/
+curl -LsSf https://raw.githubusercontent.com/isupervillain/purecode/main/install.sh | sh
 ```
 
-### From Source
+For Windows (PowerShell):
 
-Ensure you have Rust installed (version 1.70+ recommended).
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/isupervillain/purecode/main/install.ps1 | iex"
+```
+
+Run in a git repository:
 
 ```bash
-git clone https://github.com/yourusername/purecode.git
-cd purecode
-cargo install --path .
+# Compare local changes against main
+purecode
+
+# OR pipe a diff manually
+git diff --cached --unified=0 --no-color | purecode --stdin
 ```
+
+## How It Works
+
+1.  **Diff Parsing**: `purecode` takes a unified diff (standard git output). It ignores metadata and focuses on lines starting with `+` or `-`.
+2.  **Language Detection**: It identifies the file type for each hunk (e.g., `.py`, `.rs`, `.js`).
+3.  **Classification**:
+    *   **Pure Code**: Logic, variable definitions, function calls.
+    *   **Noise**: Comments (`//`, `#`), Docstrings (`"""`, `/**`), and Blank lines.
+4.  **Aggregation**: It sums up these metrics to show you the "Net Pure Code" added or removed.
+
+*Note*: For accurate results, always use `--unified=0` when piping diffs. This ensures context lines aren't counted as "noise" or "code".
 
 ## Usage
 
@@ -67,59 +70,75 @@ purecode
 
 ### Specific Commits/Branches
 
-Compare two specific references:
-
 ```bash
 purecode --base v1.0 --head v2.0
 ```
 
-### Stdin Mode (CI / Pre-commit)
-
-Pipe a unified diff into `purecode`. This is useful for pre-commit hooks or when you've already generated a diff file.
-**Note**: The diff must be generated with `--unified=0` for accurate line counting context.
+### Output Formats
 
 ```bash
-git diff --cached --unified=0 --no-color | purecode --stdin
+# Default (Colorful with emojis)
+purecode --format human
+
+# Plain (CI friendly, no colors)
+purecode --format plain
+
+# JSON (Machine readable)
+purecode --format json
 ```
 
-## Example Output
+### Thresholds & CI Gates
 
-```text
-=== OVERALL TOTAL (all languages, all lines) ===
-TOTAL lines changed : +15            -5             (net 10)
+Fail the command if the PR is "too noisy" or decreases code volume:
 
-=== PER LANGUAGE ===
-Python:
-  TOTAL : +10  -2  (net 8)
-  PURE  : +8   -1  (net 7)
+```bash
+# Fail if more than 50% of changes are comments/blanks
+purecode --max-noise-ratio 0.5
 
-Rust:
-  TOTAL : +5   -3  (net 2)
-  PURE  : +5   -3  (net 2)
+# Fail if net pure lines < 10 (ensure significant contribution)
+purecode --min-pure-lines 10
 
-=== PURE CODE ONLY (all languages) ===
-PURE code lines     : +13            -4             (net 9)
+# Fail if net pure code is negative
+purecode --fail-on-decrease
 ```
 
 ## Integration
 
 ### Pre-commit Hook
 
-Add this to your `.git/hooks/pre-commit` (or use a framework like `pre-commit`):
+Add to `.pre-commit-config.yaml`:
 
-```bash
-#!/bin/sh
-# Check purely code changes before committing
-git diff --cached --unified=0 --no-color | purecode --stdin
+```yaml
+repos:
+  - repo: https://github.com/isupervillain/purecode
+    rev: v0.4.0
+    hooks:
+      - id: purecode
+        args: ["--stdin", "--format", "human"]
 ```
 
-### CI Pipeline
+### GitHub Actions
 
-You can use `purecode` in your CI to post stats on PRs. Since it accepts stdin, you can easily run it against the changed files in a PR.
+Run `purecode` to check PR quality:
+
+```yaml
+steps:
+  - uses: actions/checkout@v4
+    with:
+      fetch-depth: 0 # Need history for diff
+
+  - name: Install PureCode
+    run: curl -LsSf https://raw.githubusercontent.com/isupervillain/purecode/main/install.sh | sh
+
+  - name: Run Analysis
+    run: |
+      # Check against the PR base
+      purecode --base origin/${{ github.base_ref }} --head HEAD --format human --max-noise-ratio 0.6
+```
 
 ## Contributing
 
-We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details on how to set up your development environment and submit PRs.
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ## License
 
