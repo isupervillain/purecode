@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use purecode::{diff, parser, report};
 use std::collections::HashMap;
 use std::process::exit;
@@ -6,7 +6,7 @@ use std::process::exit;
 #[derive(Parser, Debug)]
 #[command(name = "purecode")]
 #[command(author = "PureCode Author")]
-#[command(version = "1.0")]
+#[command(version = "0.2.0")]
 #[command(about = "Analyzes git diffs to count pure code vs noise", long_about = None)]
 struct Cli {
     /// Base ref for git diff
@@ -20,6 +20,27 @@ struct Cli {
     /// Read unified diff from stdin instead of running git
     #[arg(long)]
     stdin: bool,
+
+    /// Output format
+    #[arg(long, value_enum, default_value_t = Format::Human)]
+    format: Format,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
+enum Format {
+    Human,
+    Plain,
+    Json,
+}
+
+impl From<Format> for report::OutputFormat {
+    fn from(f: Format) -> Self {
+        match f {
+            Format::Human => report::OutputFormat::Human,
+            Format::Plain => report::OutputFormat::Plain,
+            Format::Json => report::OutputFormat::Json,
+        }
+    }
 }
 
 fn main() {
@@ -43,5 +64,5 @@ fn main() {
         exit(1);
     }
 
-    report::print_report(&stats);
+    report::print_report(&stats, args.format.into());
 }
