@@ -1,0 +1,142 @@
+name: Auto Release on Merge
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write
+
+jobs:
+  prepare_release:
+    if: github.event.pull_request.merged == true
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.get_version.outputs.version_tag }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Get Version from Cargo.toml
+        id: get_version
+        run: |
+          VERSION=$(grep -m1 'version =' Cargo.toml | cut -d '"' -f 2)
+          echo "Found version: $VERSION"
+          echo "version_tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Generate Release Notes
+        env:
+          TAG: ${{ steps.get_version.outputs.version_tag }}
+        run: |
+          cat > release_notes.md <<'EOF'
+          # PureCode $TAG
+
+          ## Highlights
+          - Add a few concise bullets about the most impactful changes.
+
+          ## Fixes
+          - Note bug fixes or quality improvements worth calling out.
+
+          ## Compatibility
+          - Breaking changes: none.
+          - Minimum supported Rust: stable.
+
+          ## Install
+          ```bash
+          curl -LsSf https://raw.githubusercontent.com/isupervillain/purecode/main/install.sh | sh
+          ```
+
+          ```powershell
+          powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/isupervillain/purecode/main/install.ps1 | iex"
+          ```
+          EOF
+
+      - name: Check and Create Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.get_version.outputs.version_tag }}
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "Error: Release $TAG already exists."
+            exit 1
+          else
+            echo "Creating release $TAG for commit $SHA"
+            gh release create "$TAG" --target "$SHA" --notes-file release_notes.md
+          fi
+
+  build_and_upload:
+    needs: prepare_release
+    name: Build and Upload Assets
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: purecode
+            asset_name: purecode-x86_64-unknown-linux-gnu.tar.gz
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact_name: purecode
+            asset_name: purecode-x86_64-unknown-linux-musl.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: purecode.exe
+            asset_name: purecode-x86_64-pc-windows-msvc.zip
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact_name: purecode
+            asset_name: purecode-x86_64-apple-darwin.tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact_name: purecode
+            asset_name: purecode-aarch64-apple-darwin.tar.gz
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Install musl-tools (Linux musl)
+        if: contains(matrix.target, 'musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Build Release
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar -czf ../../../${{ matrix.asset_name }} ${{ matrix.artifact_name }}
+          cd -
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../${{ matrix.asset_name }} ${{ matrix.artifact_name }}
+          cd -
+
+      - name: Upload Release Asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare_release.outputs.release_tag }}
+        run: |
+          gh release upload "$TAG" "${{ matrix.asset_name }}"
