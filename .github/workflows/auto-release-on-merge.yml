@@ -27,6 +27,33 @@ jobs:
           echo "Found version: $VERSION"
           echo "version_tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Generate Release Notes
+        env:
+          TAG: ${{ steps.get_version.outputs.version_tag }}
+        run: |
+          cat > release_notes.md <<'EOF'
+          # PureCode $TAG
+
+          ## Highlights
+          - Add a few concise bullets about the most impactful changes.
+
+          ## Fixes
+          - Note bug fixes or quality improvements worth calling out.
+
+          ## Compatibility
+          - Breaking changes: none.
+          - Minimum supported Rust: stable.
+
+          ## Install
+          ```bash
+          curl -LsSf https://raw.githubusercontent.com/isupervillain/purecode/main/install.sh | sh
+          ```
+
+          ```powershell
+          powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/isupervillain/purecode/main/install.ps1 | iex"
+          ```
+          EOF
+
       - name: Check and Create Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -38,7 +65,7 @@ jobs:
             exit 1
           else
             echo "Creating release $TAG for commit $SHA"
-            gh release create "$TAG" --target "$SHA" --generate-notes
+            gh release create "$TAG" --target "$SHA" --notes-file release_notes.md
           fi
 
   build_and_upload:
