@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       release_tag: ${{ steps.get_version.outputs.version_tag }}
+      release_created: ${{ steps.check_create_release.outputs.release_created }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -27,49 +28,25 @@ jobs:
           echo "Found version: $VERSION"
           echo "version_tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Generate Release Notes
-        env:
-          TAG: ${{ steps.get_version.outputs.version_tag }}
-        run: |
-          cat > release_notes.md <<'EOF'
-          # PureCode $TAG
-
-          ## Highlights
-          - Add a few concise bullets about the most impactful changes.
-
-          ## Fixes
-          - Note bug fixes or quality improvements worth calling out.
-
-          ## Compatibility
-          - Breaking changes: none.
-          - Minimum supported Rust: stable.
-
-          ## Install
-          ```bash
-          curl -LsSf https://raw.githubusercontent.com/isupervillain/purecode/main/install.sh | sh
-          ```
-
-          ```powershell
-          powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/isupervillain/purecode/main/install.ps1 | iex"
-          ```
-          EOF
-
       - name: Check and Create Release
+        id: check_create_release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.get_version.outputs.version_tag }}
           SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
           if gh release view "$TAG" > /dev/null 2>&1; then
-            echo "Error: Release $TAG already exists."
-            exit 1
+            echo "Release $TAG already exists. Skipping creation."
+            echo "release_created=false" >> "$GITHUB_OUTPUT"
           else
             echo "Creating release $TAG for commit $SHA"
-            gh release create "$TAG" --target "$SHA" --notes-file release_notes.md
+            gh release create "$TAG" --target "$SHA" --generate-notes
+            echo "release_created=true" >> "$GITHUB_OUTPUT"
           fi
 
   build_and_upload:
     needs: prepare_release
+    if: needs.prepare_release.outputs.release_created == 'true'
     name: Build and Upload Assets
     runs-on: ${{ matrix.os }}
     defaults:
