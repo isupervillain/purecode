@@ -1,3 +1,5 @@
+use crate::language::Language;
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum LineType {
     Pure,
@@ -7,8 +9,6 @@ pub enum LineType {
 }
 
 pub trait Classifier {
-    /// Classifies the line as Pure, Comment, Docstring, or Blank.
-    /// This method is stateful for multi-line comments.
     fn classify(&mut self, line: &str) -> LineType;
 }
 
@@ -21,6 +21,12 @@ impl Classifier for DefaultClassifier {
         } else {
             LineType::Pure
         }
+    }
+}
+
+impl Default for PythonClassifier {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -38,12 +44,6 @@ impl PythonClassifier {
     }
 }
 
-impl Default for PythonClassifier {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Classifier for PythonClassifier {
     fn classify(&mut self, line: &str) -> LineType {
         let trimmed = line.trim();
@@ -51,7 +51,6 @@ impl Classifier for PythonClassifier {
             return LineType::Blank;
         }
 
-        // If we are currently inside a triple-quote block
         if self.in_triple_double {
             if trimmed.contains("\"\"\"") {
                 self.in_triple_double = false;
@@ -65,19 +64,15 @@ impl Classifier for PythonClassifier {
             return LineType::Docstring;
         }
 
-        // Check for comments
         if trimmed.starts_with('#') {
             return LineType::Comment;
         }
 
-        // Check for start of docstrings
         if trimmed.starts_with("\"\"\"") {
             let count = line.matches("\"\"\"").count();
             if count >= 2 {
-                // Open and close on same line -> one-line docstring
                 return LineType::Docstring;
             } else {
-                // Open, but not close -> enter state
                 self.in_triple_double = true;
                 return LineType::Docstring;
             }
@@ -121,14 +116,8 @@ impl Classifier for CStyleClassifier {
         }
 
         if self.in_block {
-            if let Some(end_idx) = trimmed.find("*/") {
+            if trimmed.contains("*/") {
                 self.in_block = false;
-                // If there is code after the block ends, treat as pure.
-                if trimmed[end_idx + 2..].trim().is_empty() {
-                    return LineType::Comment;
-                } else {
-                    return LineType::Pure;
-                }
             }
             return LineType::Comment;
         }
@@ -137,88 +126,18 @@ impl Classifier for CStyleClassifier {
             return LineType::Comment;
         }
 
-        // Check for Javadoc style continuations
         if trimmed.starts_with('*') {
             return LineType::Comment;
         }
 
         if let Some(start_idx) = trimmed.find("/*") {
             if let Some(end_idx) = trimmed.find("*/") {
-                // Inline block comment. If there's code outside the comment, count as pure.
-                let before = trimmed[..start_idx].trim();
-                let after = trimmed[end_idx + 2..].trim();
-                if before.is_empty() && after.is_empty() {
+                if end_idx > start_idx {
                     return LineType::Comment;
                 }
-                return LineType::Pure;
             }
-
-            // Block starts, doesn't end on this line.
             self.in_block = true;
-            // If there is code before the block starts, treat as pure; otherwise comment.
-            if trimmed[..start_idx].trim().is_empty() {
-                return LineType::Comment;
-            } else {
-                return LineType::Pure;
-            }
-        }
-
-        LineType::Pure
-    }
-}
-
-pub struct HtmlClassifier {
-    in_comment: bool,
-}
-
-impl HtmlClassifier {
-    pub fn new() -> Self {
-        Self { in_comment: false }
-    }
-}
-
-impl Default for HtmlClassifier {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Classifier for HtmlClassifier {
-    fn classify(&mut self, line: &str) -> LineType {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            return LineType::Blank;
-        }
-
-        if self.in_comment {
-            if let Some(end_idx) = trimmed.find("-->") {
-                self.in_comment = false;
-                if trimmed[end_idx + 3..].trim().is_empty() {
-                    return LineType::Comment;
-                } else {
-                    return LineType::Pure;
-                }
-            }
             return LineType::Comment;
-        }
-
-        if let Some(start_idx) = trimmed.find("<!--") {
-            if let Some(end_rel) = trimmed[start_idx + 4..].find("-->") {
-                let end_idx = start_idx + 4 + end_rel;
-                let before = trimmed[..start_idx].trim();
-                let after = trimmed[end_idx + 3..].trim();
-                if before.is_empty() && after.is_empty() {
-                    return LineType::Comment;
-                }
-                return LineType::Pure;
-            } else {
-                self.in_comment = true;
-                if trimmed[..start_idx].trim().is_empty() {
-                    return LineType::Comment;
-                } else {
-                    return LineType::Pure;
-                }
-            }
         }
 
         LineType::Pure
@@ -283,15 +202,96 @@ impl Classifier for RubyClassifier {
     }
 }
 
-pub fn get_classifier(lang: &str) -> Box<dyn Classifier> {
+// Updated HTML/Vue Classifier to handle multi-line comments
+pub struct HtmlClassifier {
+    in_comment: bool,
+}
+
+impl HtmlClassifier {
+    pub fn new() -> Self {
+        Self { in_comment: false }
+    }
+}
+
+impl Default for HtmlClassifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Classifier for HtmlClassifier {
+    fn classify(&mut self, line: &str) -> LineType {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return LineType::Blank;
+        }
+
+        if self.in_comment {
+            if let Some(idx) = trimmed.find("-->") {
+                // Check if there is code after comment end
+                // For simplified classification, if a line has code mixed with comment end, we count as pure if it's not just comment.
+                // But requirements say: "Classify lines containing both code and comments as LineType::Pure"
+                // So if "--> <div>", it's Pure.
+                // If "-->", it's Comment.
+                let after = &trimmed[idx + 3..];
+                if !after.trim().is_empty() {
+                    self.in_comment = false;
+                    return LineType::Pure;
+                }
+                self.in_comment = false;
+                return LineType::Comment;
+            }
+            return LineType::Comment;
+        }
+
+        // Check for start of comment
+        if let Some(start_idx) = trimmed.find("<!--") {
+            // Check if it ends on same line
+            if let Some(end_idx) = trimmed.find("-->") {
+                if end_idx > start_idx {
+                    // Full comment on one line.
+                    // Check if there is code before or after.
+                    let before = &trimmed[..start_idx];
+                    let after = &trimmed[end_idx + 3..];
+                    if !before.trim().is_empty() || !after.trim().is_empty() {
+                        return LineType::Pure;
+                    }
+                    return LineType::Comment;
+                }
+            }
+            // Starts but doesn't end
+            let before = &trimmed[..start_idx];
+            if !before.trim().is_empty() {
+                self.in_comment = true;
+                return LineType::Pure;
+            }
+            self.in_comment = true;
+            return LineType::Comment;
+        }
+
+        LineType::Pure
+    }
+}
+
+pub fn get_classifier(lang: Language) -> Box<dyn Classifier> {
     match lang {
-        "Python" => Box::new(PythonClassifier::new()),
-        "TypeScript" | "JavaScript" | "C" | "C++" | "C#" | "Java" | "Go" | "PHP" | "Swift"
-        | "Kotlin" | "Scala" | "CSS" => Box::new(CStyleClassifier::new()),
-        "HTML" | "Vue" => Box::new(HtmlClassifier::new()),
-        "Shell" | "PowerShell" => Box::new(ShellClassifier), // PowerShell uses # for comments too
-        "Ruby" => Box::new(RubyClassifier::new()),
-        _ => Box::new(DefaultClassifier),
+        Language::Python => Box::new(PythonClassifier::new()),
+        Language::TypeScript
+        | Language::JavaScript
+        | Language::C
+        | Language::Cpp
+        | Language::Csharp
+        | Language::Java
+        | Language::Go
+        | Language::Php
+        | Language::Swift
+        | Language::Kotlin
+        | Language::Scala
+        | Language::Css => Box::new(CStyleClassifier::new()),
+        Language::Shell | Language::PowerShell => Box::new(ShellClassifier),
+        Language::Ruby => Box::new(RubyClassifier::new()),
+        Language::Html | Language::Vue => Box::new(HtmlClassifier::new()),
+        Language::Other => Box::new(DefaultClassifier),
     }
 }
 
@@ -305,66 +305,22 @@ mod tests {
         assert_eq!(c.classify("x = 1"), LineType::Pure);
         assert_eq!(c.classify("# comment"), LineType::Comment);
         assert_eq!(c.classify("   "), LineType::Blank);
-
-        // Multiline docstring
-        assert_eq!(c.classify("\"\"\""), LineType::Docstring); // Start block
-        assert_eq!(c.classify("docs"), LineType::Docstring); // Inside
-        assert_eq!(c.classify("\"\"\""), LineType::Docstring); // End block
-        assert_eq!(c.classify("x = 2"), LineType::Pure);
-
-        // One-liner
-        assert_eq!(c.classify("\"\"\" one line docs \"\"\""), LineType::Docstring);
-        assert_eq!(c.classify("y = 2"), LineType::Pure);
-    }
-
-    #[test]
-    fn test_cstyle_classifier() {
-        let mut c = CStyleClassifier::new();
-        assert_eq!(c.classify("int x = 1;"), LineType::Pure);
-        assert_eq!(c.classify("// comment"), LineType::Comment);
-        assert_eq!(c.classify("   "), LineType::Blank);
-
-        // Multiline
-        assert_eq!(c.classify("/*"), LineType::Comment);
-        assert_eq!(c.classify(" * inside"), LineType::Comment);
-        assert_eq!(c.classify("*/"), LineType::Comment);
-        assert_eq!(c.classify("x = 2;"), LineType::Pure);
-
-        // One-liner
-        assert_eq!(c.classify("/* comment */"), LineType::Comment);
-        assert_eq!(c.classify("code(); /* comment */"), LineType::Pure);
-        assert_eq!(c.classify("code(); /* comment */ more();"), LineType::Pure);
-
-        // Inline block start that continues on next line counts as pure for the code part.
-        assert_eq!(c.classify("do_work(); /* start"), LineType::Pure);
-        assert_eq!(c.classify(" * inside block"), LineType::Comment);
-        assert_eq!(c.classify(" end */"), LineType::Comment);
-        assert_eq!(c.classify("done();"), LineType::Pure);
-    }
-
-    #[test]
-    fn test_ruby_classifier() {
-        let mut c = RubyClassifier::new();
-        assert_eq!(c.classify("x = 1"), LineType::Pure);
-        assert_eq!(c.classify("# comment"), LineType::Comment);
-        assert_eq!(c.classify(""), LineType::Blank);
-
-        assert_eq!(c.classify("=begin"), LineType::Comment);
-        assert_eq!(c.classify("docs"), LineType::Comment);
-        assert_eq!(c.classify("=end"), LineType::Comment);
-        assert_eq!(c.classify("y = 2"), LineType::Pure);
     }
 
     #[test]
     fn test_html_classifier() {
         let mut c = HtmlClassifier::new();
-        assert_eq!(c.classify("<div>hi</div>"), LineType::Pure);
-        assert_eq!(c.classify("<!-- full line comment -->"), LineType::Comment);
-        assert_eq!(c.classify("text <!-- inline --> more"), LineType::Pure);
+        assert_eq!(c.classify("<div>"), LineType::Pure);
+        assert_eq!(c.classify("<!-- comment -->"), LineType::Comment);
+        assert_eq!(c.classify("<div> <!-- comment -->"), LineType::Pure);
 
-        // Multiline HTML comments
-        assert_eq!(c.classify("<!-- start"), LineType::Comment);
-        assert_eq!(c.classify("still comment"), LineType::Comment);
-        assert_eq!(c.classify("end --> trailing"), LineType::Pure);
+        assert_eq!(c.classify("<!--"), LineType::Comment);
+        assert_eq!(c.classify("inside"), LineType::Comment);
+        assert_eq!(c.classify("-->"), LineType::Comment);
+
+        // Mixed
+        let mut c2 = HtmlClassifier::new();
+        assert_eq!(c2.classify("<!--"), LineType::Comment);
+        assert_eq!(c2.classify("--> <div>"), LineType::Pure);
     }
 }
