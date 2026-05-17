@@ -17,7 +17,7 @@ jobs:
       release_created: ${{ steps.check_create_release.outputs.release_created }}
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
 
@@ -46,7 +46,7 @@ jobs:
 
   build_and_upload:
     needs: prepare_release
-    if: needs.prepare_release.outputs.release_created == 'true'
+    if: needs.prepare_release.outputs.release_tag != ''
     name: Build and Upload Assets
     runs-on: ${{ matrix.os }}
     defaults:
@@ -78,7 +78,7 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
 
