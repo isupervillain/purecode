@@ -8,9 +8,10 @@ use std::path::Path;
 use walkdir::WalkDir;
 
 pub fn analyze_files(
+    paths: &[String],
     include: &[String],
     exclude: &[String],
-    reader: Option<Box<dyn BufRead>>, // For stdin support
+    reader: Option<Box<dyn BufRead>>,
 ) -> Result<Vec<FileStats>, std::io::Error> {
     let mut stats = Vec::new();
 
@@ -40,32 +41,31 @@ pub fn analyze_files(
         .filter_map(|p| Pattern::new(p).ok())
         .collect();
 
-    for entry in WalkDir::new(".").into_iter().flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            continue;
-        }
+    for root in paths {
+        for entry in WalkDir::new(root).into_iter().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                continue;
+            }
 
-        // Convert path to relative string for matching
-        let path_str = path.to_string_lossy();
-        let clean_path = if let Some(stripped) = path_str.strip_prefix("./") {
-            stripped
-        } else {
-            &path_str
-        };
+            let path_str = path.to_string_lossy();
+            let clean_path = if let Some(stripped) = path_str.strip_prefix("./") {
+                stripped
+            } else {
+                &path_str
+            };
 
-        // Check excludes
-        if exclude_patterns.iter().any(|p| p.matches(clean_path)) {
-            continue;
-        }
+            if exclude_patterns.iter().any(|p| p.matches(clean_path)) {
+                continue;
+            }
 
-        // Check includes (at least one must match if we are strict, or default include is "**/*")
-        if !include_patterns.iter().any(|p| p.matches(clean_path)) {
-            continue;
-        }
+            if !include_patterns.iter().any(|p| p.matches(clean_path)) {
+                continue;
+            }
 
-        if let Ok(fs) = process_file(path) {
-            stats.push(fs);
+            if let Ok(fs) = process_file(path) {
+                stats.push(fs);
+            }
         }
     }
 

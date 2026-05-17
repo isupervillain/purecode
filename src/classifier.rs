@@ -68,9 +68,14 @@ impl Classifier for PythonClassifier {
             return LineType::Comment;
         }
 
-        if trimmed.starts_with("\"\"\"") {
-            let count = line.matches("\"\"\"").count();
-            if count >= 2 {
+        if let Some(idx) = trimmed.find("\"\"\"") {
+            if trimmed.matches("\"\"\"").count() >= 2 {
+                // Single-line docstring. Check for code before or after.
+                let before = &trimmed[..idx];
+                let after = &trimmed[idx + 3..];
+                if !before.trim().is_empty() || !after.trim().is_empty() {
+                    return LineType::Pure;
+                }
                 return LineType::Docstring;
             } else {
                 self.in_triple_double = true;
@@ -78,9 +83,14 @@ impl Classifier for PythonClassifier {
             }
         }
 
-        if trimmed.starts_with("'''") {
-            let count = line.matches("'''").count();
-            if count >= 2 {
+        if let Some(idx) = trimmed.find("'''") {
+            if trimmed.matches("'''").count() >= 2 {
+                // Single-line docstring. Check for code before or after.
+                let before = &trimmed[..idx];
+                let after = &trimmed[idx + 3..];
+                if !before.trim().is_empty() || !after.trim().is_empty() {
+                    return LineType::Pure;
+                }
                 return LineType::Docstring;
             } else {
                 self.in_triple_single = true;
@@ -133,8 +143,20 @@ impl Classifier for CStyleClassifier {
         if let Some(start_idx) = trimmed.find("/*") {
             if let Some(end_idx) = trimmed.find("*/") {
                 if end_idx > start_idx {
+                    // Single-line block comment. Check for code before or after.
+                    let before = &trimmed[..start_idx];
+                    let after = &trimmed[end_idx + 2..];
+                    if !before.trim().is_empty() || !after.trim().is_empty() {
+                        return LineType::Pure;
+                    }
                     return LineType::Comment;
                 }
+            }
+            // Starts but doesn't end on same line. Check for code before /*.
+            let before = &trimmed[..start_idx];
+            if !before.trim().is_empty() {
+                self.in_block = true;
+                return LineType::Pure;
             }
             self.in_block = true;
             return LineType::Comment;
@@ -287,8 +309,11 @@ pub fn get_classifier(lang: Language) -> Box<dyn Classifier> {
         | Language::Swift
         | Language::Kotlin
         | Language::Scala
-        | Language::Css => Box::new(CStyleClassifier::new()),
-        Language::Shell | Language::PowerShell => Box::new(ShellClassifier),
+        | Language::Css
+        | Language::Rust => Box::new(CStyleClassifier::new()),
+        Language::Shell | Language::PowerShell | Language::Yaml | Language::Toml => {
+            Box::new(ShellClassifier)
+        }
         Language::Ruby => Box::new(RubyClassifier::new()),
         Language::Html | Language::Vue => Box::new(HtmlClassifier::new()),
         Language::Other => Box::new(DefaultClassifier),

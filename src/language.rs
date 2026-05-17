@@ -21,6 +21,9 @@ pub enum Language {
     Shell,
     PowerShell,
     Vue,
+    Rust,
+    Yaml,
+    Toml,
     Other,
 }
 
@@ -45,12 +48,20 @@ impl Language {
             Some("sh") | Some("bash") | Some("zsh") => Language::Shell,
             Some("ps1") | Some("psm1") => Language::PowerShell,
             Some("vue") => Language::Vue,
+            Some("rs") => Language::Rust,
+            Some("yml") | Some("yaml") => Language::Yaml,
+            Some("toml") => Language::Toml,
             _ => {
                 // Check filename for special cases
-                match path.file_name().and_then(|n| n.to_str()) {
-                    Some("Dockerfile") => Language::Other, // Or maybe shell-like? keeping Other for now
-                    Some("Makefile") => Language::Other,
-                    _ => Language::Other,
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name == "Dockerfile"
+                    || name.starts_with("Dockerfile.")
+                    || name == "Makefile"
+                    || name.ends_with(".mk")
+                {
+                    Language::Shell
+                } else {
+                    Language::Other
                 }
             }
         }
@@ -78,6 +89,9 @@ impl fmt::Display for Language {
             Language::Shell => "Shell",
             Language::PowerShell => "PowerShell",
             Language::Vue => "Vue",
+            Language::Rust => "Rust",
+            Language::Yaml => "YAML",
+            Language::Toml => "TOML",
             Language::Other => "Other",
         };
         write!(f, "{}", s)
