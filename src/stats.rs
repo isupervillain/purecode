@@ -36,19 +36,42 @@ pub struct LangStats {
 }
 
 impl LangStats {
+    #[must_use]
     pub fn net_pure(&self) -> i64 {
         self.pure_added - self.pure_removed
     }
 
+    #[must_use]
     pub fn noise_added(&self) -> i64 {
         self.comment_lines_added + self.docstring_lines_added + self.blank_lines_added
     }
 
+    #[must_use]
     pub fn noise_removed(&self) -> i64 {
         self.comment_lines_removed + self.docstring_lines_removed + self.blank_lines_removed
     }
 }
 
+#[must_use]
+pub fn aggregate_stats(stats: &[FileStats]) -> LangStats {
+    stats.iter().fold(LangStats::default(), |mut acc, file| {
+        acc.total_added += file.lang_stats.total_added;
+        acc.total_removed += file.lang_stats.total_removed;
+        acc.pure_added += file.lang_stats.pure_added;
+        acc.pure_removed += file.lang_stats.pure_removed;
+        acc.comment_lines_added += file.lang_stats.comment_lines_added;
+        acc.comment_lines_removed += file.lang_stats.comment_lines_removed;
+        acc.docstring_lines_added += file.lang_stats.docstring_lines_added;
+        acc.docstring_lines_removed += file.lang_stats.docstring_lines_removed;
+        acc.blank_lines_added += file.lang_stats.blank_lines_added;
+        acc.blank_lines_removed += file.lang_stats.blank_lines_removed;
+        acc.code_words_added += file.lang_stats.code_words_added;
+        acc.code_words_removed += file.lang_stats.code_words_removed;
+        acc
+    })
+}
+
+#[must_use]
 pub fn calculate_complexity(stats: &LangStats) -> f64 {
     // complexity = pure_added * 1.0 + pure_removed * 0.5 + noise_added * 0.1 + noise_removed * 0.05
     (stats.pure_added as f64 * 1.0)
@@ -57,6 +80,7 @@ pub fn calculate_complexity(stats: &LangStats) -> f64 {
         + (stats.noise_removed() as f64 * 0.05)
 }
 
+#[must_use]
 pub fn estimate_tokens(word_count: i64) -> u64 {
     (word_count as f64 * 1.3).round() as u64
 }
