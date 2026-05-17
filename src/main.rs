@@ -1,10 +1,10 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use purecode::{
     config, diff, files, parser, report,
-    stats::{FileStats, LangStats, ThresholdError},
+    stats::{self, FileStats, ThresholdError},
 };
 use std::io::BufReader;
-use std::process::exit;
+use std::process::ExitCode;
 
 #[derive(Parser, Debug)]
 #[command(name = "purecode")]
@@ -16,7 +16,6 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    // Fallback flags for root command (diff mode)
     /// Base ref for git diff
     #[arg(long)]
     base: Option<String>,
@@ -140,8 +139,6 @@ enum Commands {
         #[arg(long)]
         ci: bool,
     },
-    /// History analysis (Scaffolding)
-    History,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
@@ -162,27 +159,28 @@ impl From<Format> for report::OutputFormat {
 }
 
 fn resolve_format(cli_format: Option<Format>, config_format: &str) -> Format {
-    if let Some(f) = cli_format {
-        f
-    } else {
-        match config_format {
-            "json" => Format::Json,
-            "plain" => Format::Plain,
-            _ => Format::Human,
-        }
-    }
+    cli_format.unwrap_or(match config_format {
+        "json" => Format::Json,
+        "plain" => Format::Plain,
+        _ => Format::Human,
+    })
 }
 
-fn main() {
+struct FilesConfig {
+    format: Format,
+    per_file: bool,
+    max_noise_ratio: Option<f64>,
+    min_pure_lines: Option<i64>,
+    fail_on_decrease: bool,
+    warn_only: bool,
+    ci: bool,
+}
+
+fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let config = config::load_config();
 
-    // Determine mode and arguments
     let (stats, mode, active_config) = match cli.command {
-        Some(Commands::History) => {
-            println!("History analysis not implemented yet.");
-            exit(0);
-        }
         Some(Commands::Files {
             paths,
             stdin,
@@ -195,13 +193,6 @@ fn main() {
             ci,
         }) => {
             let final_format = resolve_format(format, &config.format);
-
-            let _files_to_scan = if paths == vec!["."] {
-                vec![".".to_string()]
-            } else {
-                paths
-            };
-
             let include = if config.include.is_empty() {
                 vec!["**/*".to_string()]
             } else {
@@ -215,13 +206,8 @@ fn main() {
                 None
             };
 
-            let stats = match files::analyze_files(&include, &exclude, reader) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("Error analyzing files: {}", e);
-                    exit(1);
-                }
-            };
+            let stats = files::analyze_files(&paths, &include, &exclude, reader)
+                .map_err(|e| format!("Error analyzing files: {e}"))?;
 
             (
                 stats,
@@ -254,20 +240,13 @@ fn main() {
             let reader: Box<dyn std::io::BufRead> = if stdin {
                 diff::get_stdin_diff()
             } else {
-                match diff::get_git_diff(&base, &head) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        eprintln!("Error running git diff: {}", e);
-                        exit(1);
-                    }
-                }
+                diff::get_git_diff(&base, &head)
+                    .map_err(|e| format!("Error running git diff: {e}"))?
             };
 
             let mut file_stats = Vec::new();
-            if let Err(e) = parser::parse_diff(reader, &mut file_stats) {
-                eprintln!("Error parsing diff: {}", e);
-                exit(1);
-            }
+            parser::parse_diff(reader, &mut file_stats)
+                .map_err(|e| format!("Error parsing diff: {e}"))?;
 
             (
                 file_stats,
@@ -284,7 +263,6 @@ fn main() {
             )
         }
         None => {
-            // Root command fallback
             let base = cli.base.unwrap_or(config.base);
             let head = cli.head.unwrap_or("HEAD".to_string());
             let format = resolve_format(cli.format, &config.format);
@@ -292,20 +270,13 @@ fn main() {
             let reader: Box<dyn std::io::BufRead> = if cli.stdin {
                 diff::get_stdin_diff()
             } else {
-                match diff::get_git_diff(&base, &head) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        eprintln!("Error running git diff: {}", e);
-                        exit(1);
-                    }
-                }
+                diff::get_git_diff(&base, &head)
+                    .map_err(|e| format!("Error running git diff: {e}"))?
             };
 
             let mut file_stats = Vec::new();
-            if let Err(e) = parser::parse_diff(reader, &mut file_stats) {
-                eprintln!("Error parsing diff: {}", e);
-                exit(1);
-            }
+            parser::parse_diff(reader, &mut file_stats)
+                .map_err(|e| format!("Error parsing diff: {e}"))?;
 
             (
                 file_stats,
@@ -332,7 +303,6 @@ fn main() {
     );
 
     if let Err(e) = check_thresholds(&stats, &active_config) {
-        // Print fail summary for CI
         if active_config.ci {
             println!(
                 "PURECODE_FAIL reason={} {}",
@@ -341,40 +311,30 @@ fn main() {
             );
         }
 
-        eprintln!("{}", e);
+        eprintln!("{e}");
         if !active_config.warn_only {
-            exit(2);
+            return Ok(ExitCode::from(2));
         }
-    } else {
-        // Success summary is printed in print_report if CI mode
     }
+
+    Ok(ExitCode::SUCCESS)
 }
 
-struct FilesConfig {
-    format: Format,
-    per_file: bool,
-    max_noise_ratio: Option<f64>,
-    min_pure_lines: Option<i64>,
-    fail_on_decrease: bool,
-    warn_only: bool,
-    ci: bool,
+fn main() -> ExitCode {
+    match run() {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn check_thresholds(file_stats: &[FileStats], args: &FilesConfig) -> Result<(), ThresholdError> {
-    let mut overall = LangStats::default();
-    for s in file_stats {
-        overall.total_added += s.lang_stats.total_added;
-        overall.total_removed += s.lang_stats.total_removed;
-        overall.pure_added += s.lang_stats.pure_added;
-        overall.pure_removed += s.lang_stats.pure_removed;
-        overall.comment_lines_added += s.lang_stats.comment_lines_added;
-        overall.docstring_lines_added += s.lang_stats.docstring_lines_added;
-        overall.blank_lines_added += s.lang_stats.blank_lines_added;
-    }
+    let overall = stats::aggregate_stats(file_stats);
 
     if let Some(max_ratio) = args.max_noise_ratio {
         let total_changes = overall.total_added + overall.total_removed;
-
         if total_changes > 0 {
             let pure_changes = overall.pure_added + overall.pure_removed;
             let pure_ratio = pure_changes as f64 / total_changes as f64;
@@ -418,11 +378,13 @@ fn error_reason(e: &ThresholdError) -> &'static str {
 fn error_details(e: &ThresholdError) -> String {
     match e {
         ThresholdError::NoiseRatioExceeded { actual, max } => {
-            format!("noise_ratio={:.2} max_noise_ratio={:.2}", actual, max)
+            format!("noise_ratio={actual:.2} max_noise_ratio={max:.2}")
         }
         ThresholdError::MinPureLines { actual, min } => {
-            format!("net_pure_lines={} min_pure_lines={}", actual, min)
+            format!("net_pure_lines={actual} min_pure_lines={min}")
         }
-        ThresholdError::PureLinesDecreased { actual } => format!("net_pure_lines={}", actual),
+        ThresholdError::PureLinesDecreased { actual } => {
+            format!("net_pure_lines={actual}")
+        }
     }
 }

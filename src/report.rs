@@ -1,5 +1,7 @@
-use crate::stats::{calculate_complexity, estimate_tokens, AnalysisResult, FileStats, LangStats};
-use colored::*;
+use crate::stats::{
+    aggregate_stats, calculate_complexity, estimate_tokens, AnalysisResult, FileStats, LangStats,
+};
+use colored::Colorize;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,39 +18,8 @@ pub fn print_report(
     mode: &str,
     ci: bool,
 ) {
-    let mut overall = LangStats::default();
-    let mut lang_map: HashMap<String, LangStats> = HashMap::new();
-
-    for file in stats {
-        // Aggregate overall
-        overall.total_added += file.lang_stats.total_added;
-        overall.total_removed += file.lang_stats.total_removed;
-        overall.pure_added += file.lang_stats.pure_added;
-        overall.pure_removed += file.lang_stats.pure_removed;
-        overall.comment_lines_added += file.lang_stats.comment_lines_added;
-        overall.comment_lines_removed += file.lang_stats.comment_lines_removed;
-        overall.docstring_lines_added += file.lang_stats.docstring_lines_added;
-        overall.docstring_lines_removed += file.lang_stats.docstring_lines_removed;
-        overall.blank_lines_added += file.lang_stats.blank_lines_added;
-        overall.blank_lines_removed += file.lang_stats.blank_lines_removed;
-        overall.code_words_added += file.lang_stats.code_words_added;
-        overall.code_words_removed += file.lang_stats.code_words_removed;
-
-        // Aggregate per language
-        let entry = lang_map.entry(file.language.clone()).or_default();
-        entry.total_added += file.lang_stats.total_added;
-        entry.total_removed += file.lang_stats.total_removed;
-        entry.pure_added += file.lang_stats.pure_added;
-        entry.pure_removed += file.lang_stats.pure_removed;
-        entry.comment_lines_added += file.lang_stats.comment_lines_added;
-        entry.comment_lines_removed += file.lang_stats.comment_lines_removed;
-        entry.docstring_lines_added += file.lang_stats.docstring_lines_added;
-        entry.docstring_lines_removed += file.lang_stats.docstring_lines_removed;
-        entry.blank_lines_added += file.lang_stats.blank_lines_added;
-        entry.blank_lines_removed += file.lang_stats.blank_lines_removed;
-        entry.code_words_added += file.lang_stats.code_words_added;
-        entry.code_words_removed += file.lang_stats.code_words_removed;
-    }
+    let overall = aggregate_stats(stats);
+    let lang_map = aggregate_by_language(stats);
 
     let complexity = calculate_complexity(&overall);
     let token_estimate = estimate_tokens(overall.code_words_added);
@@ -63,9 +34,9 @@ pub fn print_report(
                 token_estimate,
                 mode: mode.to_string(),
             };
-            if let Ok(json) = serde_json::to_string_pretty(&result) {
-                println!("{}", json);
-            }
+            let json = serde_json::to_string_pretty(&result)
+                .expect("Failed to serialize analysis result to JSON");
+            println!("{json}");
         }
         OutputFormat::Human | OutputFormat::Plain => {
             let use_color = !ci && format == OutputFormat::Human;
@@ -92,7 +63,7 @@ pub fn print_report(
         }
     }
 
-    if ci {
+    if ci && format != OutputFormat::Json {
         // Print summary line
         let total_changes = overall.total_added + overall.total_removed;
         let pure_changes = overall.pure_added + overall.pure_removed;
@@ -102,12 +73,11 @@ pub fn print_report(
             0.0
         };
 
-        println!("PURECODE_SUMMARY noise_ratio={:.2} pure_added={} pure_removed={} files_changed={} complexity={:.2}",
-            noise_ratio,
+        println!(
+            "PURECODE_SUMMARY noise_ratio={noise_ratio:.2} pure_added={} pure_removed={} files_changed={} complexity={complexity:.2}",
             overall.pure_added,
             overall.pure_removed,
             stats.len(),
-            complexity
         );
     }
 }
@@ -128,7 +98,7 @@ fn print_human_report(
         complexity,
         complexity_bucket(complexity)
     );
-    println!("Estimated Tokens (Added): {}", tokens);
+    println!("Estimated Tokens (Added): {tokens}");
 
     println!("\n{}", "Language Breakdown:".bold());
     let mut sorted_langs: Vec<_> = lang_map.iter().collect();
@@ -175,7 +145,7 @@ fn print_plain_report(
         complexity,
         complexity_bucket(complexity)
     );
-    println!("Estimated Tokens (Added): {}", tokens);
+    println!("Estimated Tokens (Added): {tokens}");
 
     println!("\nLanguage Breakdown:");
     let mut sorted_langs: Vec<_> = lang_map.iter().collect();
@@ -214,4 +184,24 @@ fn complexity_bucket(score: f64) -> &'static str {
     } else {
         "heavy"
     }
+}
+
+fn aggregate_by_language(stats: &[FileStats]) -> HashMap<String, LangStats> {
+    let mut lang_map: HashMap<String, LangStats> = HashMap::new();
+    for file in stats {
+        let entry = lang_map.entry(file.language.clone()).or_default();
+        entry.total_added += file.lang_stats.total_added;
+        entry.total_removed += file.lang_stats.total_removed;
+        entry.pure_added += file.lang_stats.pure_added;
+        entry.pure_removed += file.lang_stats.pure_removed;
+        entry.comment_lines_added += file.lang_stats.comment_lines_added;
+        entry.comment_lines_removed += file.lang_stats.comment_lines_removed;
+        entry.docstring_lines_added += file.lang_stats.docstring_lines_added;
+        entry.docstring_lines_removed += file.lang_stats.docstring_lines_removed;
+        entry.blank_lines_added += file.lang_stats.blank_lines_added;
+        entry.blank_lines_removed += file.lang_stats.blank_lines_removed;
+        entry.code_words_added += file.lang_stats.code_words_added;
+        entry.code_words_removed += file.lang_stats.code_words_removed;
+    }
+    lang_map
 }
