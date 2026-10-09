@@ -29,10 +29,14 @@ pub enum Language {
 
 impl Language {
     pub fn from_path(path: &Path) -> Self {
-        match path.extension().and_then(|e| e.to_str()) {
-            Some("py") => Language::Python,
-            Some("js") | Some("jsx") | Some("mjs") => Language::JavaScript,
-            Some("ts") | Some("tsx") => Language::TypeScript,
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase);
+        match ext.as_deref() {
+            Some("py") | Some("pyi") => Language::Python,
+            Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => Language::JavaScript,
+            Some("ts") | Some("tsx") | Some("mts") | Some("cts") => Language::TypeScript,
             Some("html") | Some("htm") => Language::Html,
             Some("css") | Some("scss") => Language::Css,
             Some("c") | Some("h") => Language::C,
@@ -56,7 +60,7 @@ impl Language {
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if name == "Dockerfile"
                     || name.starts_with("Dockerfile.")
-                    || name == "Makefile"
+                    || matches!(name, "Makefile" | "makefile" | "GNUmakefile")
                     || name.ends_with(".mk")
                 {
                     Language::Shell
@@ -95,5 +99,26 @@ impl fmt::Display for Language {
             Language::Other => "Other",
         };
         write!(f, "{}", s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_variant_and_uppercase_extensions() {
+        for (path, lang) in [
+            ("a.cjs", Language::JavaScript),
+            ("a.mts", Language::TypeScript),
+            ("a.cts", Language::TypeScript),
+            ("a.pyi", Language::Python),
+            ("A.PY", Language::Python),
+            ("makefile", Language::Shell),
+            ("GNUmakefile", Language::Shell),
+            ("README", Language::Other),
+        ] {
+            assert_eq!(Language::from_path(Path::new(path)), lang, "{path}");
+        }
     }
 }

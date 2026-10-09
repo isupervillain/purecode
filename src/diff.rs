@@ -1,29 +1,153 @@
-use std::io::{self, BufReader};
-use std::process::{Command, Stdio};
+use crate::parser::BlobSource;
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-pub fn get_git_diff(base: &str, head: &str) -> io::Result<Box<dyn std::io::BufRead>> {
-    let output = Command::new("git")
-        .args([
-            "diff",
-            &format!("{}...{}", base, head),
-            "--unified=0",
-            "--no-color",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+/// A git command that never runs a repository-configured fsmonitor hook.
+fn git() -> Command {
+    let mut cmd = Command::new("git");
+    cmd.args(["-c", "core.fsmonitor=false"]);
+    cmd
+}
 
-    let output = output.wait_with_output()?;
+/// What to diff.
+pub enum DiffTarget<'a> {
+    /// Changes on `head` since it diverged from `base` (`git diff base...head`).
+    Refs { base: &'a str, head: &'a str },
+    /// Changes staged for the next commit (`git diff --cached`).
+    Staged,
+}
+
+/// Runs `git diff` in the form the parser expects, regardless of the user's git config.
+pub fn get_git_diff(target: DiffTarget) -> io::Result<Box<dyn BufRead>> {
+    // Outside a repository `git diff` would fall back to `--no-index` and print its usage;
+    // report git's own reason instead (not a repository, `safe.directory` ownership, ...).
+    let check = git()
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()?;
+    if !check.status.success() {
+        return Err(io::Error::other(format!(
+            "{} (use --stdin to analyze a diff from elsewhere)",
+            String::from_utf8_lossy(&check.stderr).trim()
+        )));
+    }
+
+    let mut cmd = git();
+    // `diff.relative` would limit and re-root paths; `--no-relative` needs git 2.28+.
+    cmd.args(["-c", "diff.relative=false"]);
+    cmd.args([
+        "diff",
+        "--unified=0",
+        "--no-color",
+        // An external diff tool, textconv filter or missing/custom path prefixes would change
+        // or empty the output and silently pass a CI gate.
+        "--no-ext-diff",
+        "--no-textconv",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        // Full blob ids let the parser classify changed lines within their whole file.
+        "--full-index",
+    ]);
+    match target {
+        DiffTarget::Refs { base, head } => {
+            for r in [base, head] {
+                // A ref like `--output=/path` from a repo's config would be a git option.
+                if r.starts_with('-') || r.is_empty() {
+                    return Err(io::Error::other(format!("invalid git ref '{r}'")));
+                }
+            }
+            cmd.arg(format!("{base}...{head}"));
+        }
+        DiffTarget::Staged => {
+            cmd.arg("--cached");
+        }
+    }
+    let output = cmd.arg("--").stderr(Stdio::piped()).output()?;
 
     if !output.status.success() {
         let err_msg = String::from_utf8_lossy(&output.stderr);
-        return Err(io::Error::other(format!("git diff failed: {}", err_msg)));
+        return Err(io::Error::other(err_msg.trim().to_string()));
     }
 
-    let cursor = std::io::Cursor::new(output.stdout);
-    Ok(Box::new(BufReader::new(cursor)))
+    Ok(Box::new(io::Cursor::new(output.stdout)))
 }
 
-pub fn get_stdin_diff() -> Box<dyn std::io::BufRead> {
+pub fn get_stdin_diff() -> Box<dyn BufRead> {
     Box::new(BufReader::new(io::stdin()))
+}
+
+/// Blobs above this size are not loaded (their lines are classified per hunk), so a crafted
+/// diff naming a huge file cannot exhaust memory.
+pub const MAX_BLOB_BYTES: usize = 4 << 20;
+
+/// Reads blobs from the current repository through one long-lived `git cat-file --batch`.
+/// Outside a repository, for unknown ids or for blobs over [`MAX_BLOB_BYTES`], lookups return
+/// `None`.
+pub struct GitBlobs {
+    process: Option<(Child, ChildStdin, BufReader<ChildStdout>)>,
+    /// Ids already found oversized or not a blob: a diff naming one again (a forged diff can
+    /// repeat it) must not make git inflate it again.
+    unusable: std::collections::HashSet<String>,
+}
+
+impl GitBlobs {
+    pub fn new() -> Self {
+        let process = git()
+            .args(["cat-file", "--batch"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()
+            .and_then(|mut child| {
+                let stdin = child.stdin.take()?;
+                let stdout = BufReader::new(child.stdout.take()?);
+                Some((child, stdin, stdout))
+            });
+        Self {
+            process,
+            unusable: std::collections::HashSet::new(),
+        }
+    }
+}
+
+impl Default for GitBlobs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BlobSource for GitBlobs {
+    fn blob(&mut self, id: &str) -> Option<Vec<u8>> {
+        if self.unusable.contains(id) {
+            return None;
+        }
+        let (_, stdin, stdout) = self.process.as_mut()?;
+        writeln!(stdin, "{id}").ok()?;
+        stdin.flush().ok()?;
+        // "<oid> <type> <size>\n<content>\n", or "<id> missing\n".
+        let mut header = String::new();
+        stdout.read_line(&mut header).ok()?;
+        let mut parts = header.split_whitespace().skip(1);
+        let (kind, size) = (parts.next()?, parts.next()?.parse::<u64>().ok()?);
+        if kind != "blob" || size > MAX_BLOB_BYTES as u64 {
+            self.unusable.insert(id.to_string());
+            // Skip the content (plus its trailing newline) to stay in sync for the next request.
+            let body = size.saturating_add(1);
+            io::copy(&mut stdout.by_ref().take(body), &mut io::sink()).ok()?;
+            return None;
+        }
+        let mut content = vec![0; size as usize + 1];
+        stdout.read_exact(&mut content).ok()?;
+        content.pop();
+        Some(content)
+    }
+}
+
+impl Drop for GitBlobs {
+    fn drop(&mut self) {
+        if let Some((mut child, stdin, _)) = self.process.take() {
+            drop(stdin); // EOF ends cat-file
+            let _ = child.wait();
+        }
+    }
 }

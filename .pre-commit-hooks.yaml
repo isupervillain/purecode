@@ -1,7 +1,9 @@
 - id: purecode
   name: purecode
-  entry: purecode
+  description: Analyze staged changes for pure code vs noise
+  entry: purecode diff --staged
   language: system
   pass_filenames: false
-  stages: [commit-msg, pre-commit]
-  args: ["--stdin"]
+  always_run: true
+  stages: [pre-commit]
+  minimum_pre_commit_version: "3.2.0"

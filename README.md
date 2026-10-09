@@ -15,8 +15,8 @@ A fast, language-aware code analysis tool that distinguishes "pure code" from "n
 
 PureCode operates in a pipeline:
 
-1. **Parser**: Reads a git diff (Diff Mode) or file contents (Snapshot Mode).
-2. **Classifier**: A stateful engine that processes content line-by-line. It detects the language based on file extension and applies language-specific rules (e.g., Python triple-quotes, C-style block comments) to classify each line as `Pure`, `Comment`, `Docstring`, or `Blank`.
+1. **Parser**: Reads a git diff (Diff Mode) or file contents (Snapshot Mode). In Diff Mode, changed lines are classified in the context of their whole file, read from git by the blob ids in the diff, so a line added inside an existing docstring or block comment counts as noise.
+2. **Classifier**: A stateful engine that processes content line-by-line. It detects the language based on file extension and applies language-specific rules to classify each line as `Pure`, `Comment`, `Docstring`, or `Blank`. Comment markers inside string, template and regex literals are ignored; a Python triple-quoted string is a docstring only when it is a statement on its own (`x = """…` or a string argument inside brackets is code); `<script>`/`<style>` blocks in HTML and Vue use C-style rules. A line with any code on it is `Pure`; shebangs count as code.
 3. **Stats Aggregator**: Accumulates metrics per file and per language.
 4. **Reporter**: Outputs the data in the requested format (Human, JSON, Plain).
 
@@ -27,7 +27,7 @@ PureCode operates in a pipeline:
 Install with a single command (macOS / Linux):
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/isupervillain/purecode/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/isupervillain/purecode/main/install.sh | sh
 ```
 
 For Windows (PowerShell):
@@ -37,6 +37,8 @@ powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/isu
 ```
 
 ### From Source
+
+Requires Rust 1.88 or newer and git.
 
 ```bash
 cargo install --path .
@@ -49,15 +51,20 @@ cargo install --path .
 Analyzes the changes between two git references.
 
 ```bash
-# Analyze changes between main and HEAD
+# Analyze changes on HEAD since it diverged from main (git diff base...head)
 purecode diff --base origin/main --head HEAD
 
 # Shortcut (uses default origin/main -> HEAD)
 purecode
 
+# Analyze staged changes (what a pre-commit hook sees)
+purecode diff --staged
+
 # Read diff from stdin
-git diff origin/main | purecode diff --stdin
+git diff --unified=0 --full-index origin/main | purecode diff --stdin
 ```
+
+PureCode runs `git diff` itself with fixed options, so personal git settings such as an external diff tool, textconv filters, `diff.noprefix` or `diff.relative` cannot change the result. A diff read from stdin inside the same repository is also classified with whole-file context; otherwise each hunk is classified on its own (context lines are used when present). If a `.gitattributes` entry (such as `*.py -diff`) makes git treat a source file as binary, it cannot be counted and a warning names it. Combined merge diffs (`diff --cc`) are rejected; diff a merge against one parent instead. Submodule and symlink changes are not counted. `--stdin` cannot be combined with `--base`, `--head` or `--staged`.
 
 ### Files Mode (Snapshot)
 
@@ -70,9 +77,16 @@ purecode files
 # Analyze specific directories
 purecode files src/ lib/
 
-# Exclude node_modules (respected by default, but customizable)
-purecode files --exclude "**/node_modules/**"
+# Skip more files via .purecode.toml (see Configuration)
 ```
+
+Files ignored by git (`.gitignore` at any level, `.git/info/exclude`, the global gitignore) or by `.ignore` are skipped, and ignored directories such as build output are never walked. Binary files, symlinks, `.git/`, `node_modules`, `target`, `dist` and lock files (`*.lock`, `package-lock.json`, `pnpm-lock.yaml`) are skipped too; unreadable files and files over 32 MiB are skipped with a warning. A file that is committed but matches `.gitignore` is skipped as well. Outside a git repository `.gitignore` files are not used (`.ignore` files are). Hidden files such as `.github/` workflows are analyzed. Files in an unrecognized language are counted under `Other`, with every non-blank line as pure.
+
+When stdin is used (`purecode files --stdin`), one file path per line is read and include/exclude are not applied.
+
+### Languages
+
+Python, JavaScript (`.js .jsx .mjs .cjs`), TypeScript (`.ts .tsx .mts .cts`), HTML, Vue, CSS/SCSS, C, C++, C#, Java, Go, PHP, Ruby, Swift, Kotlin, Scala, Rust, Shell (including Dockerfile and Makefile), PowerShell, YAML and TOML. Extensions are matched case-insensitively.
 
 ### Options
 
@@ -82,11 +96,13 @@ purecode files --exclude "**/node_modules/**"
 - `--min-pure-lines <N>`: Fail if net pure lines count is less than N.
 - `--fail-on-decrease`: Fail if net pure code contribution is negative.
 - `--warn-only`: Print validation failures but exit with 0 (useful for non-blocking CI).
-- `--ci`: Enable CI mode (no colors, deterministic output, summary lines).
+- `--ci`: Enable CI mode (no colors, summary lines; see [CI Mode](#ci-mode)).
+- `--staged` (diff mode): Analyze changes staged for commit.
+- `--no-config`: Ignore `.purecode.toml` and use only command-line settings.
 
 ## Configuration
 
-You can configure defaults via a `.purecode.toml` file in your project root:
+You can configure defaults via a `.purecode.toml` file in your project root. PureCode looks for it in the working directory and its parents, up to the repository root, so running from a subdirectory uses the same settings. Outside a git repository only the working directory is searched.
 
 ```toml
 [purecode]
@@ -99,10 +115,42 @@ warn_only = false
 ci = false
 
 include = ["src/**"]
-exclude = ["**/*.lock", "dist/**", "target/**", "node_modules/**"]
+exclude = ["**/*.lock", "**/dist/**", "**/target/**", "**/node_modules/**"]
 ```
 
-CLI flags always override configuration values.
+Setting `include` or `exclude` replaces its default list. Keys may also be written at the top level without the `[purecode]` header. Unknown keys, invalid values (a `max_noise_ratio` outside 0.0–1.0, an invalid glob) or unparsable TOML are an error (exit code 1), so a typo cannot silently disable a CI threshold.
+
+CLI flags override configuration values. Boolean settings (`fail_on_decrease`, `warn_only`, `ci`) can only be switched on from the command line, not off.
+
+`include`/`exclude` are glob patterns. In Files Mode they are matched against paths relative to the project root (or, for a scanned path outside it, relative to that path), so directories above the project never match. In Diff Mode they are matched against repository-relative paths. `*` matches within one directory; use a `**/` prefix to match at any depth.
+
+## Exit Codes
+
+| Code | Meaning |
+| ---- | ------- |
+| 0 | Success (or threshold failure with `--warn-only`) |
+| 1 | Runtime error (e.g. `git diff` failed, bad input) |
+| 2 | A threshold check failed, or invalid command-line usage |
+
+## Security
+
+PureCode reads untrusted input in CI: the analyzed change controls file names and contents, `.purecode.toml`, `.gitignore` and `.gitattributes`.
+
+- **Gate integrity**: `.purecode.toml` is read from the checked-out change, so a pull request can loosen its own thresholds (`warn_only`, `exclude`). For an enforcing gate, pass thresholds on the command line with `--no-config`.
+- **Git**: PureCode runs `git diff` with options that disable external diff tools, textconv filters and fsmonitor hooks, and rejects refs that start with `-`.
+- **Output**: control and bidi characters in file names and error messages are escaped; `.purecode.toml` must be a regular file (not a symlink), and parse errors never quote its contents.
+- **Resources**: changed lines in files over 4 MiB are classified per hunk instead of loading the whole file; Files Mode skips files over 32 MiB.
+- **Installers** verify the downloaded archive against the release's `SHA256SUMS`. The checksums come from the same release, so they catch corrupted or tampered downloads, not a compromised release.
+- **`.gitattributes`**: an entry such as `*.py -diff` makes git report source files as binary, so they cannot be counted. PureCode names each such file in a warning but does not fail; check for it when the gate must be strict.
+
+## Limitations
+
+Classification is heuristic, line-based, and needs no compiler. Known edge cases:
+
+- When whole-file context is unavailable (a diff from another repository piped to `--stdin`), a hunk that starts inside a block comment is recognised only by its leading `*` lines (`* text`, `*/`), and a Python string argument that starts a hunk is treated as a docstring.
+- Because each file is classified as a whole, a construct the line-based rules misread can affect the lines after it in that file, not only its own line. Known cases: a C# verbatim string (`@"…"`) or PHP heredoc spanning lines and containing `/*`.
+- Heredocs and code embedded in YAML (`run: |`) are classified by the host language's rules.
+- In JavaScript, a regex literal is recognised after an operator, an opening bracket or a keyword such as `return`; elsewhere, and for literals longer than 256 characters, `/` is treated as division.
 
 ## Integration
 
@@ -113,11 +161,13 @@ Add to `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/isupervillain/purecode
-    rev: v0.2.0
+    rev: v0.3.0
     hooks:
       - id: purecode
-        args: ["--stdin", "--format", "human"]
+        args: ["--format", "human"]
 ```
+
+The hook runs `purecode diff --staged`; thresholds come from `args` or `.purecode.toml`.
 
 ### GitHub Actions
 
@@ -130,13 +180,15 @@ steps:
       fetch-depth: 0 # Need history for diff
 
   - name: Install PureCode
-    run: curl -LsSf https://raw.githubusercontent.com/isupervillain/purecode/main/install.sh | sh
+    run: curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/isupervillain/purecode/main/install.sh | sh
 
   - name: Run Analysis
-    run: |
-      # Check against the PR base
-      purecode --base origin/${{ github.base_ref }} --head HEAD --format human --max-noise-ratio 0.6
+    env:
+      BASE_REF: ${{ github.base_ref }} # via env: branch names must not be spliced into the script
+    run: purecode --base "origin/$BASE_REF" --head HEAD --no-config --max-noise-ratio 0.6
 ```
+
+`--no-config` keeps a pull request from relaxing the gate through its own `.purecode.toml` (see [Security](#security)).
 
 ## Output Formats
 
@@ -172,9 +224,11 @@ On failure:
 PURECODE_FAIL reason=noise_ratio_exceeded noise_ratio=0.62 max_noise_ratio=0.50
 ```
 
+With `--format json` these lines are omitted so stdout stays a single JSON document; the failure reason is printed to stderr and the exit code is 2.
+
 ## Contributing
 
-1. Clone the repository: `git clone https://github.com/isupervillain/purecode-priv`
+1. Clone the repository: `git clone https://github.com/isupervillain/purecode`
 2. Run tests: `cargo test`
 3. Submit a PR.
 

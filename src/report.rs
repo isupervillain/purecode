@@ -2,7 +2,7 @@ use crate::stats::{
     aggregate_stats, calculate_complexity, estimate_tokens, AnalysisResult, FileStats, LangStats,
 };
 use colored::Colorize;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
@@ -85,7 +85,7 @@ pub fn print_report(
 fn print_human_report(
     files: &[FileStats],
     overall: &LangStats,
-    lang_map: &HashMap<String, LangStats>,
+    lang_map: &BTreeMap<String, LangStats>,
     per_file: bool,
     complexity: f64,
     tokens: u64,
@@ -101,10 +101,7 @@ fn print_human_report(
     println!("Estimated Tokens (Added): {tokens}");
 
     println!("\n{}", "Language Breakdown:".bold());
-    let mut sorted_langs: Vec<_> = lang_map.iter().collect();
-    sorted_langs.sort_by_key(|(k, _)| *k);
-
-    for (lang, stat) in sorted_langs {
+    for (lang, stat) in lang_map {
         println!(
             "  {:<12} | Pure: {:>4} | Added: {:>4} | Removed: {:>4} | Noise: {:>4}",
             lang.blue(),
@@ -120,7 +117,7 @@ fn print_human_report(
         for file in files {
             println!(
                 "  {:<30} [{}] | Pure: {:>3}",
-                file.path,
+                printable(&file.path),
                 file.language.yellow(),
                 file.lang_stats.net_pure()
             );
@@ -132,7 +129,7 @@ fn print_human_report(
 fn print_plain_report(
     files: &[FileStats],
     overall: &LangStats,
-    lang_map: &HashMap<String, LangStats>,
+    lang_map: &BTreeMap<String, LangStats>,
     per_file: bool,
     complexity: f64,
     tokens: u64,
@@ -148,10 +145,7 @@ fn print_plain_report(
     println!("Estimated Tokens (Added): {tokens}");
 
     println!("\nLanguage Breakdown:");
-    let mut sorted_langs: Vec<_> = lang_map.iter().collect();
-    sorted_langs.sort_by_key(|(k, _)| *k);
-
-    for (lang, stat) in sorted_langs {
+    for (lang, stat) in lang_map {
         println!(
             "  {:<12} | Pure: {:>4} | Added: {:>4} | Removed: {:>4} | Noise: {:>4}",
             lang,
@@ -167,13 +161,35 @@ fn print_plain_report(
         for file in files {
             println!(
                 "  {:<30} [{}] | Pure: {:>3}",
-                file.path,
+                printable(&file.path),
                 file.language,
                 file.lang_stats.net_pure()
             );
         }
     }
     println!();
+}
+
+/// `text` with control and invisible formatting characters escaped, so file names from an
+/// untrusted diff cannot inject terminal escape sequences or bidi overrides that spoof names.
+pub fn printable(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        // Bidi controls, zero-width and other invisible formatting characters, line/paragraph
+        // separators, variation selectors, fillers and tag characters (can hide text).
+        let invisible = matches!(c,
+            '\u{00ad}' | '\u{034f}' | '\u{061c}' | '\u{115f}' | '\u{1160}' | '\u{17b4}'
+            | '\u{17b5}' | '\u{180b}'..='\u{180f}' | '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{3164}'
+            | '\u{fe00}'..='\u{fe0f}' | '\u{feff}' | '\u{ffa0}' | '\u{fff9}'..='\u{fffb}'
+            | '\u{1d173}'..='\u{1d17a}' | '\u{e0000}'..='\u{e0fff}');
+        if c.is_control() || invisible {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn complexity_bucket(score: f64) -> &'static str {
@@ -186,8 +202,8 @@ fn complexity_bucket(score: f64) -> &'static str {
     }
 }
 
-fn aggregate_by_language(stats: &[FileStats]) -> HashMap<String, LangStats> {
-    let mut lang_map: HashMap<String, LangStats> = HashMap::new();
+fn aggregate_by_language(stats: &[FileStats]) -> BTreeMap<String, LangStats> {
+    let mut lang_map: BTreeMap<String, LangStats> = BTreeMap::new();
     for file in stats {
         let entry = lang_map.entry(file.language.clone()).or_default();
         entry.total_added += file.lang_stats.total_added;
@@ -204,4 +220,25 @@ fn aggregate_by_language(stats: &[FileStats]) -> HashMap<String, LangStats> {
         entry.code_words_removed += file.lang_stats.code_words_removed;
     }
     lang_map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn printable_escapes_control_characters() {
+        assert_eq!(
+            printable("evil\u{1b}[2J\u{7}.py"),
+            "evil\\u{1b}[2J\\u{7}.py"
+        );
+        assert_eq!(printable("src/é ü.py"), "src/é ü.py");
+        assert_eq!(printable("a\u{202e}yp.exe"), "a\\u{202e}yp.exe");
+        for hidden in ['\u{e0041}', '\u{2028}', '\u{00ad}', '\u{fe0f}', '\u{3164}'] {
+            assert!(
+                !printable(&format!("a{hidden}b")).contains(hidden),
+                "{hidden:?}"
+            );
+        }
+    }
 }
