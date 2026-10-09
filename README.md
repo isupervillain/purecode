@@ -27,7 +27,7 @@ PureCode operates in a pipeline:
 Install with a single command (macOS / Linux):
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/isupervillain/purecode/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/isupervillain/purecode/main/install.sh | sh
 ```
 
 For Windows (PowerShell):
@@ -140,7 +140,8 @@ PureCode reads untrusted input in CI: the analyzed change controls file names an
 - **Git**: PureCode runs `git diff` with options that disable external diff tools, textconv filters and fsmonitor hooks, and rejects refs that start with `-`.
 - **Output**: control and bidi characters in file names and error messages are escaped; `.purecode.toml` must be a regular file (not a symlink), and parse errors never quote its contents.
 - **Resources**: changed lines in files over 4 MiB are classified per hunk instead of loading the whole file; Files Mode skips files over 32 MiB.
-- **Installers** verify the downloaded archive against the release's `SHA256SUMS`.
+- **Installers** verify the downloaded archive against the release's `SHA256SUMS`. The checksums come from the same release, so they catch corrupted or tampered downloads, not a compromised release.
+- **`.gitattributes`**: an entry such as `*.py -diff` makes git report source files as binary, so they cannot be counted. PureCode names each such file in a warning but does not fail; check for it when the gate must be strict.
 
 ## Limitations
 
@@ -149,7 +150,7 @@ Classification is heuristic, line-based, and needs no compiler. Known edge cases
 - When whole-file context is unavailable (a diff from another repository piped to `--stdin`), a hunk that starts inside a block comment is recognised only by its leading `*` lines (`* text`, `*/`), and a Python string argument that starts a hunk is treated as a docstring.
 - Because each file is classified as a whole, a construct the line-based rules misread can affect the lines after it in that file, not only its own line. Known cases: a C# verbatim string (`@"…"`) or PHP heredoc spanning lines and containing `/*`.
 - Heredocs and code embedded in YAML (`run: |`) are classified by the host language's rules.
-- In JavaScript, a regex literal is recognised after an operator, an opening bracket or a keyword such as `return`; elsewhere `/` is division.
+- In JavaScript, a regex literal is recognised after an operator, an opening bracket or a keyword such as `return`; elsewhere, and for literals longer than 256 characters, `/` is treated as division.
 
 ## Integration
 
@@ -179,7 +180,7 @@ steps:
       fetch-depth: 0 # Need history for diff
 
   - name: Install PureCode
-    run: curl -LsSf https://raw.githubusercontent.com/isupervillain/purecode/main/install.sh | sh
+    run: curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/isupervillain/purecode/main/install.sh | sh
 
   - name: Run Analysis
     env:

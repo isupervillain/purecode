@@ -29,5 +29,5 @@
 - `git diff` runs with fixed options, so an external diff tool, textconv, `diff.noprefix` or `diff.relative` cannot change the result; refs starting with `-` are rejected.
 - Control and bidi characters in file names and error messages are escaped; `.purecode.toml` must be a regular file and its parse errors no longer quote its contents.
 - Crafted input can no longer exhaust CPU or memory: regex detection is bounded, whole-file context is limited to files up to 4 MiB, and Files Mode skips files over 32 MiB.
-- git runs with fsmonitor disabled; release builds use `--locked`, pinned actions and least-privilege tokens, and releases stay drafts until their assets are uploaded.
+- git runs with fsmonitor disabled; release builds use `--locked`, pinned actions and least-privilege tokens, and releases stay drafts until their assets are uploaded; releases are cut only from merges into `main`, and an unfinished draft from a failed run is recreated.
 - `--version` reports the real version; the pre-commit hook analyzes staged changes; the release workflow builds the Intel macOS asset again.

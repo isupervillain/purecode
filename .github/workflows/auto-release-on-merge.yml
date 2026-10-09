@@ -3,6 +3,7 @@ name: Auto Release on Merge
 on:
   pull_request:
     types: [closed]
+    branches: [main]
 
 # Jobs get write access only where they publish; the build job runs repository code with a
 # read-only token.
@@ -40,6 +41,11 @@ jobs:
           TAG: ${{ steps.get_version.outputs.version_tag }}
           SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
+          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)" = "true" ]; then
+            # Left over from a run whose build or publish failed: start it again.
+            echo "Deleting unfinished draft release $TAG"
+            gh release delete "$TAG" --yes
+          fi
           if gh release view "$TAG" > /dev/null 2>&1; then
             echo "Release $TAG already exists. Skipping creation."
             echo "release_created=false" >> "$GITHUB_OUTPUT"

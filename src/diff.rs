@@ -84,6 +84,9 @@ pub const MAX_BLOB_BYTES: usize = 4 << 20;
 /// `None`.
 pub struct GitBlobs {
     process: Option<(Child, ChildStdin, BufReader<ChildStdout>)>,
+    /// Ids already found oversized or not a blob: a diff naming one again (a forged diff can
+    /// repeat it) must not make git inflate it again.
+    unusable: std::collections::HashSet<String>,
 }
 
 impl GitBlobs {
@@ -100,7 +103,10 @@ impl GitBlobs {
                 let stdout = BufReader::new(child.stdout.take()?);
                 Some((child, stdin, stdout))
             });
-        Self { process }
+        Self {
+            process,
+            unusable: std::collections::HashSet::new(),
+        }
     }
 }
 
@@ -112,6 +118,9 @@ impl Default for GitBlobs {
 
 impl BlobSource for GitBlobs {
     fn blob(&mut self, id: &str) -> Option<Vec<u8>> {
+        if self.unusable.contains(id) {
+            return None;
+        }
         let (_, stdin, stdout) = self.process.as_mut()?;
         writeln!(stdin, "{id}").ok()?;
         stdin.flush().ok()?;
@@ -121,8 +130,10 @@ impl BlobSource for GitBlobs {
         let mut parts = header.split_whitespace().skip(1);
         let (kind, size) = (parts.next()?, parts.next()?.parse::<u64>().ok()?);
         if kind != "blob" || size > MAX_BLOB_BYTES as u64 {
+            self.unusable.insert(id.to_string());
             // Skip the content (plus its trailing newline) to stay in sync for the next request.
-            io::copy(&mut stdout.by_ref().take(size + 1), &mut io::sink()).ok()?;
+            let body = size.saturating_add(1);
+            io::copy(&mut stdout.by_ref().take(body), &mut io::sink()).ok()?;
             return None;
         }
         let mut content = vec![0; size as usize + 1];

@@ -175,8 +175,14 @@ fn print_plain_report(
 pub fn printable(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
-        let invisible = matches!(c, '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
-            | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}');
+        // Bidi controls, zero-width and other invisible formatting characters, line/paragraph
+        // separators, variation selectors, fillers and tag characters (can hide text).
+        let invisible = matches!(c,
+            '\u{00ad}' | '\u{034f}' | '\u{061c}' | '\u{115f}' | '\u{1160}' | '\u{17b4}'
+            | '\u{17b5}' | '\u{180b}'..='\u{180f}' | '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{3164}'
+            | '\u{fe00}'..='\u{fe0f}' | '\u{feff}' | '\u{ffa0}' | '\u{fff9}'..='\u{fffb}'
+            | '\u{1d173}'..='\u{1d17a}' | '\u{e0000}'..='\u{e0fff}');
         if c.is_control() || invisible {
             out.extend(c.escape_default());
         } else {
@@ -228,5 +234,11 @@ mod tests {
         );
         assert_eq!(printable("src/é ü.py"), "src/é ü.py");
         assert_eq!(printable("a\u{202e}yp.exe"), "a\\u{202e}yp.exe");
+        for hidden in ['\u{e0041}', '\u{2028}', '\u{00ad}', '\u{fe0f}', '\u{3164}'] {
+            assert!(
+                !printable(&format!("a{hidden}b")).contains(hidden),
+                "{hidden:?}"
+            );
+        }
     }
 }
