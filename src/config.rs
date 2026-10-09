@@ -1,6 +1,7 @@
+use glob::{MatchOptions, Pattern};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -60,18 +61,28 @@ impl Default for Config {
     }
 }
 
-/// Loads `.purecode.toml` from the working directory, or defaults when it is absent.
+/// Finds `.purecode.toml` in the working directory or a parent, up to the repository root, and
+/// returns the config with the directory it applies to (the project root). Without a config
+/// file, the defaults apply to the working directory.
 ///
 /// A config that cannot be read or parsed is an error: silently falling back to defaults
 /// would disable the thresholds a CI gate relies on.
-pub fn load_config() -> Result<Config, String> {
-    let path = Path::new(".purecode.toml");
-    if !path.exists() {
-        return Ok(Config::default());
+pub fn load_config() -> Result<(Config, PathBuf), String> {
+    let cwd = std::env::current_dir().map_err(|e| format!("Cannot read working directory: {e}"))?;
+    for dir in cwd.ancestors() {
+        let path = dir.join(".purecode.toml");
+        if path.is_file() {
+            let content = fs::read_to_string(&path)
+                .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+            let config =
+                parse_config(&content).map_err(|e| format!("Invalid {}: {e}", path.display()))?;
+            return Ok((config, dir.to_path_buf()));
+        }
+        if dir.join(".git").exists() {
+            break;
+        }
     }
-    let content =
-        fs::read_to_string(path).map_err(|e| format!("Failed to read .purecode.toml: {e}"))?;
-    parse_config(&content).map_err(|e| format!("Invalid .purecode.toml: {e}"))
+    Ok((Config::default(), cwd))
 }
 
 /// Accepts keys at the top level or under a `[purecode]` table.
@@ -91,7 +102,51 @@ fn parse_config(content: &str) -> Result<Config, String> {
             config.format
         ));
     }
+    if let Some(r) = config.max_noise_ratio {
+        check_ratio(r).map_err(|e| format!("max_noise_ratio: {e}"))?;
+    }
+    PathFilter::new(&config.include, &config.exclude)?;
     Ok(config)
+}
+
+/// A noise ratio threshold must be a number from 0.0 to 1.0.
+pub fn check_ratio(value: f64) -> Result<f64, String> {
+    if (0.0..=1.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err(format!("must be between 0.0 and 1.0, got {value}"))
+    }
+}
+
+/// Include/exclude globs, matched against paths relative to the project root. `*` stays within
+/// one directory; `**/` matches at any depth.
+pub struct PathFilter {
+    include: Vec<Pattern>,
+    exclude: Vec<Pattern>,
+}
+
+impl PathFilter {
+    pub fn new(include: &[String], exclude: &[String]) -> Result<Self, String> {
+        let compile = |globs: &[String]| {
+            globs
+                .iter()
+                .map(|g| Pattern::new(g).map_err(|e| format!("invalid glob '{g}': {e}")))
+                .collect::<Result<Vec<_>, _>>()
+        };
+        Ok(Self {
+            include: compile(include)?,
+            exclude: compile(exclude)?,
+        })
+    }
+
+    pub fn selects(&self, rel: &Path) -> bool {
+        let opts = MatchOptions {
+            require_literal_separator: true,
+            ..MatchOptions::new()
+        };
+        let hit = |p: &Pattern| p.matches_path_with(rel, opts);
+        self.include.iter().any(hit) && !self.exclude.iter().any(hit)
+    }
 }
 
 #[cfg(test)]
@@ -99,16 +154,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_excludes_match_at_any_depth() {
-        let excludes: Vec<glob::Pattern> = default_exclude()
-            .iter()
-            .map(|p| glob::Pattern::new(p).unwrap())
-            .collect();
-        let hit = |path: &str| excludes.iter().any(|p| p.matches(path));
-        assert!(hit("target/debug/x"));
-        assert!(hit("web/node_modules/a/b.js"));
-        assert!(hit(".git/config"));
-        assert!(!hit("src/main.rs"));
+    fn default_filter_excludes_at_any_depth() {
+        let f = PathFilter::new(&default_include(), &default_exclude()).unwrap();
+        for excluded in [
+            "target/debug/x",
+            "web/node_modules/a/b.js",
+            ".git/config",
+            "a/b.lock",
+        ] {
+            assert!(!f.selects(Path::new(excluded)), "{excluded}");
+        }
+        assert!(f.selects(Path::new("src/main.rs")));
+        assert!(f.selects(Path::new("Cargo.toml")));
+    }
+
+    #[test]
+    fn single_star_stays_within_a_directory() {
+        let f = PathFilter::new(&default_include(), &["*.py".to_string()]).unwrap();
+        assert!(!f.selects(Path::new("q.py")));
+        assert!(f.selects(Path::new("sub/q.py")));
     }
 
     #[test]
@@ -127,5 +191,9 @@ mod tests {
         assert!(parse_config("max_noise_ratoi = 0.5").is_err()); // typo
         assert!(parse_config("format = \"xml\"").is_err());
         assert!(parse_config("base = ").is_err());
+        assert!(parse_config("include = [\"src/[\"]").is_err());
+        assert!(parse_config("max_noise_ratio = 5.0").is_err());
+        assert!(parse_config("max_noise_ratio = nan").is_err());
+        assert!(parse_config("max_noise_ratio = -0.1").is_err());
     }
 }

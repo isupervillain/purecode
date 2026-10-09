@@ -2,7 +2,7 @@ use crate::stats::{
     aggregate_stats, calculate_complexity, estimate_tokens, AnalysisResult, FileStats, LangStats,
 };
 use colored::Colorize;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
@@ -85,7 +85,7 @@ pub fn print_report(
 fn print_human_report(
     files: &[FileStats],
     overall: &LangStats,
-    lang_map: &HashMap<String, LangStats>,
+    lang_map: &BTreeMap<String, LangStats>,
     per_file: bool,
     complexity: f64,
     tokens: u64,
@@ -101,10 +101,7 @@ fn print_human_report(
     println!("Estimated Tokens (Added): {tokens}");
 
     println!("\n{}", "Language Breakdown:".bold());
-    let mut sorted_langs: Vec<_> = lang_map.iter().collect();
-    sorted_langs.sort_by_key(|(k, _)| *k);
-
-    for (lang, stat) in sorted_langs {
+    for (lang, stat) in lang_map {
         println!(
             "  {:<12} | Pure: {:>4} | Added: {:>4} | Removed: {:>4} | Noise: {:>4}",
             lang.blue(),
@@ -132,7 +129,7 @@ fn print_human_report(
 fn print_plain_report(
     files: &[FileStats],
     overall: &LangStats,
-    lang_map: &HashMap<String, LangStats>,
+    lang_map: &BTreeMap<String, LangStats>,
     per_file: bool,
     complexity: f64,
     tokens: u64,
@@ -148,10 +145,7 @@ fn print_plain_report(
     println!("Estimated Tokens (Added): {tokens}");
 
     println!("\nLanguage Breakdown:");
-    let mut sorted_langs: Vec<_> = lang_map.iter().collect();
-    sorted_langs.sort_by_key(|(k, _)| *k);
-
-    for (lang, stat) in sorted_langs {
+    for (lang, stat) in lang_map {
         println!(
             "  {:<12} | Pure: {:>4} | Added: {:>4} | Removed: {:>4} | Noise: {:>4}",
             lang,
@@ -186,8 +180,8 @@ fn complexity_bucket(score: f64) -> &'static str {
     }
 }
 
-fn aggregate_by_language(stats: &[FileStats]) -> HashMap<String, LangStats> {
-    let mut lang_map: HashMap<String, LangStats> = HashMap::new();
+fn aggregate_by_language(stats: &[FileStats]) -> BTreeMap<String, LangStats> {
+    let mut lang_map: BTreeMap<String, LangStats> = BTreeMap::new();
     for file in stats {
         let entry = lang_map.entry(file.language.clone()).or_default();
         entry.total_added += file.lang_stats.total_added;

@@ -1,10 +1,10 @@
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct AnalysisResult {
     pub summary: LangStats,
-    pub language_stats: HashMap<String, LangStats>, // Keyed by Language::to_string()
+    pub language_stats: BTreeMap<String, LangStats>, // Keyed by Language::to_string()
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_stats: Option<Vec<FileStats>>,
     pub complexity_score: f64,

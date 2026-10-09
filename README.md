@@ -15,8 +15,8 @@ A fast, language-aware code analysis tool that distinguishes "pure code" from "n
 
 PureCode operates in a pipeline:
 
-1. **Parser**: Reads a git diff (Diff Mode) or file contents (Snapshot Mode).
-2. **Classifier**: A stateful engine that processes content line-by-line. It detects the language based on file extension and applies language-specific rules to classify each line as `Pure`, `Comment`, `Docstring`, or `Blank`. Comment markers inside string, template and regex literals are ignored; a Python triple-quoted string is a docstring only when it starts a statement (`x = """…` is code); `<script>`/`<style>` blocks in HTML and Vue use C-style rules. A line with any code on it is `Pure`; shebangs count as code.
+1. **Parser**: Reads a git diff (Diff Mode) or file contents (Snapshot Mode). In Diff Mode, changed lines are classified in the context of their whole file, read from git by the blob ids in the diff, so a line added inside an existing docstring or block comment counts as noise.
+2. **Classifier**: A stateful engine that processes content line-by-line. It detects the language based on file extension and applies language-specific rules to classify each line as `Pure`, `Comment`, `Docstring`, or `Blank`. Comment markers inside string, template and regex literals are ignored; a Python triple-quoted string is a docstring only when it is a statement on its own (`x = """…` or a string argument inside brackets is code); `<script>`/`<style>` blocks in HTML and Vue use C-style rules. A line with any code on it is `Pure`; shebangs count as code.
 3. **Stats Aggregator**: Accumulates metrics per file and per language.
 4. **Reporter**: Outputs the data in the requested format (Human, JSON, Plain).
 
@@ -55,9 +55,14 @@ purecode diff --base origin/main --head HEAD
 # Shortcut (uses default origin/main -> HEAD)
 purecode
 
+# Analyze staged changes (what a pre-commit hook sees)
+purecode diff --staged
+
 # Read diff from stdin
-git diff --unified=0 origin/main | purecode diff --stdin
+git diff --unified=0 --full-index origin/main | purecode diff --stdin
 ```
+
+PureCode runs `git diff` itself with fixed options, so personal git settings such as an external diff tool, textconv filters, `diff.noprefix` or `diff.relative` cannot change the result. A diff read from stdin inside the same repository is also classified with whole-file context; otherwise each hunk is classified on its own (context lines are used when present). Combined merge diffs (`diff --cc`) are rejected; diff a merge against one parent instead. Submodule pointer changes are not counted.
 
 ### Files Mode (Snapshot)
 
@@ -73,9 +78,13 @@ purecode files src/ lib/
 # Skip more files via .purecode.toml (see Configuration)
 ```
 
-Files ignored by git (`.gitignore` at any level, `.git/info/exclude`, the global gitignore) or by `.ignore` are skipped, and ignored directories such as build output are never walked. Also skipped: as are binary files, `.git/`, `node_modules`, `target`, `dist` and lock files (`*.lock`, `package-lock.json`, `pnpm-lock.yaml`). Hidden files such as `.github/` workflows are analyzed. Files in an unrecognized language are counted under `Other`, with every non-blank line as pure.
+Files ignored by git (`.gitignore` at any level, `.git/info/exclude`, the global gitignore) or by `.ignore` are skipped, and ignored directories such as build output are never walked. Binary files, `.git/`, `node_modules`, `target`, `dist` and lock files (`*.lock`, `package-lock.json`, `pnpm-lock.yaml`) are skipped too; unreadable files are skipped with a warning. Hidden files such as `.github/` workflows are analyzed. Files in an unrecognized language are counted under `Other`, with every non-blank line as pure.
 
 When stdin is used (`purecode files --stdin`), one file path per line is read and include/exclude are not applied.
+
+### Languages
+
+Python, JavaScript (`.js .jsx .mjs .cjs`), TypeScript (`.ts .tsx .mts .cts`), HTML, Vue, CSS/SCSS, C, C++, C#, Java, Go, PHP, Ruby, Swift, Kotlin, Scala, Rust, Shell (including Dockerfile and Makefile), PowerShell, YAML and TOML. Extensions are matched case-insensitively.
 
 ### Options
 
@@ -85,11 +94,12 @@ When stdin is used (`purecode files --stdin`), one file path per line is read an
 - `--min-pure-lines <N>`: Fail if net pure lines count is less than N.
 - `--fail-on-decrease`: Fail if net pure code contribution is negative.
 - `--warn-only`: Print validation failures but exit with 0 (useful for non-blocking CI).
-- `--ci`: Enable CI mode (no colors, deterministic output, summary lines).
+- `--ci`: Enable CI mode (no colors, summary lines; see [CI Mode](#ci-mode)).
+- `--staged` (diff mode): Analyze changes staged for commit.
 
 ## Configuration
 
-You can configure defaults via a `.purecode.toml` file in your project root:
+You can configure defaults via a `.purecode.toml` file in your project root. PureCode looks for it in the working directory and its parents, up to the repository root, so running from a subdirectory uses the same settings.
 
 ```toml
 [purecode]
@@ -105,9 +115,11 @@ include = ["src/**"]
 exclude = ["**/*.lock", "**/dist/**", "**/target/**", "**/node_modules/**"]
 ```
 
-Setting `include` or `exclude` replaces its default list. Keys may also be written at the top level without the `[purecode]` header. Unknown keys, invalid values or unparsable TOML are an error (exit code 1), so a typo cannot silently disable a CI threshold.
+Setting `include` or `exclude` replaces its default list. Keys may also be written at the top level without the `[purecode]` header. Unknown keys, invalid values (a `max_noise_ratio` outside 0.0–1.0, an invalid glob) or unparsable TOML are an error (exit code 1), so a typo cannot silently disable a CI threshold.
 
-CLI flags always override configuration values. `include`/`exclude` are glob patterns matched against paths relative to the working directory (or, for a scanned path outside it, relative to that path); directories above it never match. Use a `**/` prefix to match at any depth.
+CLI flags override configuration values. Boolean settings (`fail_on_decrease`, `warn_only`, `ci`) can only be switched on from the command line, not off.
+
+`include`/`exclude` are glob patterns. In Files Mode they are matched against paths relative to the project root (or, for a scanned path outside it, relative to that path), so directories above the project never match. In Diff Mode they are matched against repository-relative paths. `*` matches within one directory; use a `**/` prefix to match at any depth.
 
 ## Exit Codes
 
@@ -121,8 +133,7 @@ CLI flags always override configuration values. `include`/`exclude` are glob pat
 
 Classification is heuristic, line-based, and needs no compiler. Known edge cases:
 
-- A diff hunk shows only part of a file, so a hunk that starts inside a block comment is recognised only by its leading `*` lines (`* text`, `*/`). A hunk whose first line is a wrapped `* operand` is counted as a comment.
-- A Python triple-quoted string that starts a line is treated as a docstring, even when it is a call argument.
+- When whole-file context is unavailable (a diff from another repository piped to `--stdin`), a hunk that starts inside a block comment is recognised only by its leading `*` lines (`* text`, `*/`), and a Python string argument that starts a hunk is treated as a docstring.
 - Heredocs and code embedded in YAML (`run: |`) are classified by the host language's rules.
 - In JavaScript, a regex literal is recognised after an operator, an opening bracket or a keyword such as `return`; elsewhere `/` is division.
 
@@ -140,6 +151,8 @@ repos:
       - id: purecode
         args: ["--format", "human"]
 ```
+
+The hook runs `purecode diff --staged`; thresholds come from `args` or `.purecode.toml`.
 
 ### GitHub Actions
 
@@ -193,6 +206,8 @@ On failure:
 ```bash
 PURECODE_FAIL reason=noise_ratio_exceeded noise_ratio=0.62 max_noise_ratio=0.50
 ```
+
+With `--format json` these lines are omitted so stdout stays a single JSON document; the failure reason is printed to stderr and the exit code is 2.
 
 ## Contributing
 
