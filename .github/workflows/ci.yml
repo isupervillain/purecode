@@ -56,3 +56,17 @@ jobs:
         with:
           name: ${{ matrix.artifact_name }}
           path: target/release/${{ matrix.asset_name }}
+
+  msrv:
+    name: Minimum supported Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust (rust-version from Cargo.toml)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88.0"
+
+      - name: Check
+        run: cargo check --locked --all-targets

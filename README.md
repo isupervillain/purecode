@@ -38,6 +38,8 @@ powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/isu
 
 ### From Source
 
+Requires Rust 1.88 or newer and git.
+
 ```bash
 cargo install --path .
 ```
@@ -134,7 +136,7 @@ CLI flags override configuration values. Boolean settings (`fail_on_decrease`, `
 Classification is heuristic, line-based, and needs no compiler. Known edge cases:
 
 - When whole-file context is unavailable (a diff from another repository piped to `--stdin`), a hunk that starts inside a block comment is recognised only by its leading `*` lines (`* text`, `*/`), and a Python string argument that starts a hunk is treated as a docstring.
-- Because each file is classified as a whole, a construct the line-based rules misread (an unusual literal that hides a `/*`, say) can affect the lines after it in that file, not only its own line.
+- Because each file is classified as a whole, a construct the line-based rules misread can affect the lines after it in that file, not only its own line. Known cases: a C# verbatim string (`@"…"`) or PHP heredoc spanning lines and containing `/*`.
 - Heredocs and code embedded in YAML (`run: |`) are classified by the host language's rules.
 - In JavaScript, a regex literal is recognised after an operator, an opening bracket or a keyword such as `return`; elsewhere `/` is division.
 

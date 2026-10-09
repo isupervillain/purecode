@@ -9,7 +9,9 @@
 - An invalid `.purecode.toml` (unknown key, bad value, invalid glob, unparsable TOML) is an error (exit 1) instead of silently falling back to defaults. Keys may be written at the top level or under `[purecode]`.
 - `.purecode.toml` is found from subdirectories (searched up to the repository root).
 - Files mode respects `.gitignore`, skips binary and lock files, and decodes non-UTF-8 files instead of skipping them.
-- `--stdin` cannot be combined with `--base`/`--head`; `--max-noise-ratio` must be between 0.0 and 1.0; in globs `*` no longer matches across `/`.
+- `--stdin` cannot be combined with `--base`/`--head`, and `--staged` with neither; `--max-noise-ratio` must be between 0.0 and 1.0; in globs `*` no longer matches across `/`.
+- Submodule and symlink changes are not counted.
+- Building from source requires Rust 1.88 (declared as `rust-version`).
 - With `--format json --ci`, `PURECODE_FAIL` is no longer appended to stdout, so the output stays valid JSON.
 
 ### Added

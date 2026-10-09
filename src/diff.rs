@@ -58,10 +58,7 @@ pub fn get_git_diff(target: DiffTarget) -> io::Result<Box<dyn BufRead>> {
 
     if !output.status.success() {
         let err_msg = String::from_utf8_lossy(&output.stderr);
-        return Err(io::Error::other(format!(
-            "git diff failed: {}",
-            err_msg.trim()
-        )));
+        return Err(io::Error::other(err_msg.trim().to_string()));
     }
 
     Ok(Box::new(io::Cursor::new(output.stdout)))

@@ -368,11 +368,11 @@ impl Classifier for CStyleClassifier {
     }
 }
 
-/// `chars` ends with a lone `b` (as in `br"..."`), not with a longer identifier.
+/// `chars` ends with a lone `b` or `c` (as in `br"..."`, `cr"..."`), not a longer identifier.
 fn is_byte_prefix(chars: &[char]) -> bool {
     match chars {
-        [.., before, 'b'] => !(before.is_alphanumeric() || *before == '_'),
-        ['b'] => true,
+        [.., before, 'b' | 'c'] => !(before.is_alphanumeric() || *before == '_'),
+        ['b' | 'c'] => true,
         _ => false,
     }
 }
@@ -987,11 +987,13 @@ mod tests {
         assert_eq!(rs.classify(r#"     glob: src/*.rs""#), LineType::Pure);
         assert_eq!(rs.classify("fn real() { let x = 1; }"), LineType::Pure);
         assert_eq!(rs.classify("// comment"), LineType::Comment);
-        assert_eq!(rs.classify(r#"let p = br"C:";"#), LineType::Pure);
+        assert_eq!(rs.classify(r#"let p = br"C:\";"#), LineType::Pure);
+        assert_eq!(rs.classify("// comment"), LineType::Comment);
+        assert_eq!(rs.classify(r#"let c = cr"C:\";"#), LineType::Pure);
         assert_eq!(rs.classify("// comment"), LineType::Comment);
         let mut js = CStyleClassifier::new();
-        assert_eq!(js.classify(r#"const s = "a /* "#), LineType::Pure);
-        assert_eq!(js.classify(r#"b";"#), LineType::Pure);
+        assert_eq!(js.classify(r#"const s = "a /* \"#), LineType::Pure);
+        assert_eq!(js.classify(r#"b */ x";"#), LineType::Pure);
         assert_eq!(js.classify("// comment"), LineType::Comment);
         assert_eq!(js.classify(r#"const t = "unterminated"#), LineType::Pure);
         assert_eq!(js.classify("// still a comment"), LineType::Comment);

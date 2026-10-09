@@ -170,19 +170,20 @@ fn print_plain_report(
     println!();
 }
 
-/// `text` with control characters escaped, so file names from an untrusted diff cannot inject
-/// terminal escape sequences into logs or terminals.
+/// `text` with control and invisible formatting characters escaped, so file names from an
+/// untrusted diff cannot inject terminal escape sequences or bidi overrides that spoof names.
 pub fn printable(text: &str) -> String {
-    text.chars()
-        .flat_map(|c| {
-            let escaped: Vec<char> = if c.is_control() {
-                c.escape_default().collect()
-            } else {
-                vec![c]
-            };
-            escaped
-        })
-        .collect()
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        let invisible = matches!(c, '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}');
+        if c.is_control() || invisible {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn complexity_bucket(score: f64) -> &'static str {
@@ -226,5 +227,6 @@ mod tests {
             "evil\\u{1b}[2J\\u{7}.py"
         );
         assert_eq!(printable("src/é ü.py"), "src/é ü.py");
+        assert_eq!(printable("a\u{202e}yp.exe"), "a\\u{202e}yp.exe");
     }
 }

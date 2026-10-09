@@ -27,7 +27,7 @@ impl Repo {
     }
 
     fn git(&self, args: &[&str]) -> Output {
-        let out = Command::new("git")
+        let out = hermetic(Command::new("git"))
             .args(args)
             .current_dir(&self.dir)
             .env("GIT_AUTHOR_NAME", "t")
@@ -56,7 +56,7 @@ impl Repo {
     }
 
     fn purecode_in(&self, dir: &Path, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_purecode"))
+        hermetic(Command::new(env!("CARGO_BIN_EXE_purecode")))
             .args(args)
             .current_dir(dir)
             .output()
@@ -68,6 +68,16 @@ impl Drop for Repo {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// Isolates git from the developer's global/system config (e.g. commit signing) and locale.
+fn hermetic(mut cmd: Command) -> Command {
+    let empty = std::env::temp_dir().join(format!("purecode-cli-{}.gitconfig", std::process::id()));
+    std::fs::write(&empty, "").unwrap();
+    cmd.env("GIT_CONFIG_GLOBAL", empty)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("LC_ALL", "C");
+    cmd
 }
 
 /// The `summary` object of a JSON report.
@@ -169,10 +179,16 @@ fn ref_that_looks_like_an_option_is_rejected() {
 
 #[test]
 fn user_git_config_cannot_change_the_result() {
-    let repo = repo_with_change(&[("a.py", b"x = 1\n")], &[("a.py", b"x = 2\ny = 3\n")]);
+    let repo = repo_with_change(
+        &[("a.py", b"x = 1\n"), ("sub/b.py", b"b = 1\n")],
+        &[("a.py", b"x = 2\ny = 3\n"), ("sub/b.py", b"b = 1\n")],
+    );
     repo.git(&["config", "diff.external", "false"]);
     repo.git(&["config", "diff.noprefix", "true"]);
-    let s = summary(&repo.purecode(&["diff", "--base", "base", "--format", "json"]));
+    repo.git(&["config", "diff.relative", "true"]);
+    // From a subdirectory, diff.relative would hide a.py entirely.
+    let sub = repo.dir.join("sub");
+    let s = summary(&repo.purecode_in(&sub, &["diff", "--base", "base", "--format", "json"]));
     assert_eq!(s["pure_added"], 2);
     assert_eq!(s["pure_removed"], 1);
 }
@@ -240,7 +256,7 @@ fn invalid_config_is_an_error() {
 fn outside_a_repository_reports_gits_reason() {
     let dir = std::env::temp_dir().join(format!("purecode-norepo-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_purecode"))
+    let out = hermetic(Command::new(env!("CARGO_BIN_EXE_purecode")))
         .current_dir(&dir)
         .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .output()
@@ -260,4 +276,47 @@ fn control_characters_in_file_names_are_escaped() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!stdout.contains('\x1b'), "{stdout}");
     assert!(stdout.contains("evil\\u{1b}[2J.py"), "{stdout}");
+}
+
+#[test]
+fn stdin_conflicts_with_git_selection_flags() {
+    let repo = repo_with_change(&[("a.py", b"x = 1\n")], &[("a.py", b"x = 2\n")]);
+    for args in [
+        ["diff", "--stdin", "--staged"],
+        ["diff", "--stdin", "--base=base"],
+        ["diff", "--staged", "--head=HEAD"],
+    ] {
+        let out = repo.purecode(&args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+    }
+}
+
+#[test]
+fn config_outside_a_repository_is_not_inherited_from_parents() {
+    let parent = std::env::temp_dir().join(format!("purecode-cfg-{}", std::process::id()));
+    let child = parent.join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::write(parent.join(".purecode.toml"), "min_pure_lines = 99\n").unwrap();
+    std::fs::write(child.join("a.py"), "x = 1\n").unwrap();
+    let out = hermetic(Command::new(env!("CARGO_BIN_EXE_purecode")))
+        .args(["files", "."])
+        .current_dir(&child)
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&parent);
+    assert!(out.status.success(), "{out:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_changes_are_not_counted() {
+    let repo = Repo::new();
+    repo.write("a.py", b"x = 1\n");
+    repo.commit("base");
+    repo.git(&["branch", "base"]);
+    std::os::unix::fs::symlink("a.py", repo.dir.join("link.py")).unwrap();
+    repo.commit("link");
+    let s = summary(&repo.purecode(&["diff", "--base", "base", "--format", "json"]));
+    assert_eq!(s["total_added"], 0);
 }
