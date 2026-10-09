@@ -1,7 +1,8 @@
 - id: purecode
   name: purecode
-  entry: purecode
+  description: Analyze staged changes for pure code vs noise
+  entry: sh -c 'git diff --cached --unified=0 --no-color | purecode --stdin "$@"' --
   language: system
   pass_filenames: false
-  stages: [commit-msg, pre-commit]
-  args: ["--stdin"]
+  always_run: true
+  stages: [pre-commit]

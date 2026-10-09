@@ -34,10 +34,10 @@ fn default_include() -> Vec<String> {
 fn default_exclude() -> Vec<String> {
     vec![
         "**/*.lock".to_string(),
-        "dist/**".to_string(),
-        "target/**".to_string(),
-        "node_modules/**".to_string(),
-        ".git/**".to_string(),
+        "**/dist/**".to_string(),
+        "**/target/**".to_string(),
+        "**/node_modules/**".to_string(),
+        "**/.git/**".to_string(),
     ]
 }
 
@@ -69,4 +69,22 @@ pub fn load_config() -> Config {
         }
     }
     Config::default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_excludes_match_nested_and_absolute_paths() {
+        let excludes: Vec<glob::Pattern> = default_exclude()
+            .iter()
+            .map(|p| glob::Pattern::new(p).unwrap())
+            .collect();
+        let hit = |path: &str| excludes.iter().any(|p| p.matches(path));
+        assert!(hit("target/debug/x"));
+        assert!(hit("web/node_modules/a/b.js"));
+        assert!(hit("/tmp/repo/.git/config"));
+        assert!(!hit("src/main.rs"));
+    }
 }

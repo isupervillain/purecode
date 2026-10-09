@@ -42,7 +42,7 @@ jobs:
 
       - name: Run Clippy
         if: matrix.os == 'ubuntu-latest'
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Build Release
         run: cargo build --release

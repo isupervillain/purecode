@@ -55,7 +55,7 @@ esac
 echo "Detecting latest version..."
 LATEST_URL="https://github.com/$REPO/releases/latest"
 # -I headers only, -o /dev/null discard body, -w redirect_url print final url
-RELEASE_URL=$(curl -Ls -o /dev/null -w %{url_effective} "$LATEST_URL")
+RELEASE_URL=$(curl -Ls -o /dev/null -w "%{url_effective}" "$LATEST_URL")
 # Extract tag from URL (e.g. .../releases/tag/v0.3.0)
 VERSION_TAG=$(basename "$RELEASE_URL")
 

@@ -11,7 +11,7 @@ Thank you for your interest in contributing to `purecode`! We want to make this 
 
 1.  **Clone the repository**:
     ```bash
-    git clone https://github.com/yourusername/purecode.git
+    git clone https://github.com/isupervillain/purecode.git
     cd purecode
     ```
 
@@ -37,7 +37,7 @@ Thank you for your interest in contributing to `purecode`! We want to make this 
 - **Formatting**: Please run `cargo fmt` before submitting.
 - **Linting**: We use `clippy` to catch common mistakes. Please run `cargo clippy` and address warnings.
     ```bash
-    cargo clippy -- -D warnings
+    cargo clippy --all-targets -- -D warnings
     ```
 - **Documentation**: Public structs and functions should have documentation comments (`///`).
 

@@ -136,7 +136,8 @@ impl Classifier for CStyleClassifier {
             return LineType::Comment;
         }
 
-        if trimmed.starts_with('*') {
+        // Mid-block line of a hunk that started inside a comment (`* text`, `*`, `*/`), not `*ptr`.
+        if trimmed == "*" || trimmed.starts_with("* ") || trimmed.starts_with("*/") {
             return LineType::Comment;
         }
 
@@ -330,6 +331,14 @@ mod tests {
         assert_eq!(c.classify("x = 1"), LineType::Pure);
         assert_eq!(c.classify("# comment"), LineType::Comment);
         assert_eq!(c.classify("   "), LineType::Blank);
+    }
+
+    #[test]
+    fn test_cstyle_pointer_deref_is_code() {
+        let mut c = CStyleClassifier::new();
+        assert_eq!(c.classify("*p = 1;"), LineType::Pure);
+        assert_eq!(c.classify("* continued doc line"), LineType::Comment);
+        assert_eq!(c.classify("*/"), LineType::Comment);
     }
 
     #[test]

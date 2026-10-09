@@ -8,8 +8,7 @@ use std::process::ExitCode;
 
 #[derive(Parser, Debug)]
 #[command(name = "purecode")]
-#[command(author = "PureCode Author")]
-#[command(version = "0.2.0")]
+#[command(version)]
 #[command(about = "Analyzes code to count pure code vs noise", long_about = None)]
 #[command(args_conflicts_with_subcommands = true)]
 struct Cli {
@@ -62,12 +61,12 @@ enum Commands {
     /// Analyze git diffs
     Diff {
         /// Base ref for git diff
-        #[arg(long, default_value = "origin/main")]
-        base: String,
+        #[arg(long)]
+        base: Option<String>,
 
         /// Head ref for git diff
-        #[arg(long, default_value = "HEAD")]
-        head: String,
+        #[arg(long)]
+        head: Option<String>,
 
         /// Read unified diff from stdin
         #[arg(long)]
@@ -236,6 +235,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             ci,
         }) => {
             let final_format = resolve_format(format, &config.format);
+            let base = base.unwrap_or(config.base);
+            let head = head.unwrap_or_else(|| "HEAD".to_string());
 
             let reader: Box<dyn std::io::BufRead> = if stdin {
                 diff::get_stdin_diff()

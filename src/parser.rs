@@ -1,4 +1,4 @@
-use crate::classifier::{get_classifier, LineType};
+use crate::classifier::{get_classifier, Classifier, LineType};
 use crate::language::Language;
 use crate::stats::{FileStats, LangStats};
 use std::path::Path;
@@ -12,9 +12,40 @@ pub fn parse_diff<R: std::io::BufRead>(
     let mut classifier = get_classifier(Language::Other);
     let mut is_binary_diff = false;
     let mut context_warning_printed = false;
+    // Lines still owed by the current hunk. While non-zero, `---`/`+++` are content, not headers.
+    let (mut old_left, mut new_left) = (0usize, 0usize);
 
     for line_result in reader.lines() {
         let line = line_result?;
+
+        if line.starts_with("diff --git ") {
+            (old_left, new_left) = (0, 0);
+        }
+
+        if old_left > 0 || new_left > 0 {
+            if let Some(fs) = &mut current_file_stats {
+                match line.as_bytes().first() {
+                    Some(b'-') => {
+                        old_left = old_left.saturating_sub(1);
+                        record(&mut fs.lang_stats, classifier.as_mut(), &line[1..], false);
+                    }
+                    Some(b'+') => {
+                        new_left = new_left.saturating_sub(1);
+                        record(&mut fs.lang_stats, classifier.as_mut(), &line[1..], true);
+                    }
+                    Some(b'\\') => {} // "\ No newline at end of file"
+                    _ => {
+                        old_left = old_left.saturating_sub(1);
+                        new_left = new_left.saturating_sub(1);
+                        if !context_warning_printed {
+                            eprintln!("Warning: Context line detected. Please use 'git diff --unified=0' for accurate results.");
+                            context_warning_printed = true;
+                        }
+                    }
+                }
+                continue;
+            }
+        }
 
         // Detect binary files diff
         if line.starts_with("Binary files") && line.contains("differ") {
@@ -93,6 +124,7 @@ pub fn parse_diff<R: std::io::BufRead>(
 
         // Hunk header
         if line.starts_with("@@") {
+            (old_left, new_left) = hunk_counts(&line);
             // Reset classifier state for new hunk because hunks are disjoint
             // and carrying state (like in_comment) across hunks is dangerous.
             // We re-initialize the classifier for the current language.
@@ -115,47 +147,6 @@ pub fn parse_diff<R: std::io::BufRead>(
         if is_binary_diff {
             continue;
         }
-
-        let file_stats = match &mut current_file_stats {
-            Some(fs) => fs,
-            None => continue,
-        };
-
-        if line.starts_with('+') && !line.starts_with("+++") {
-            let content = &line[1..];
-            let stat = &mut file_stats.lang_stats;
-            stat.total_added += 1;
-
-            match classifier.classify(content) {
-                LineType::Pure => {
-                    stat.pure_added += 1;
-                    stat.code_words_added += count_words(content) as i64;
-                }
-                LineType::Comment => stat.comment_lines_added += 1,
-                LineType::Docstring => stat.docstring_lines_added += 1,
-                LineType::Blank => stat.blank_lines_added += 1,
-            }
-        } else if line.starts_with('-') && !line.starts_with("---") {
-            let content = &line[1..];
-            let stat = &mut file_stats.lang_stats;
-            stat.total_removed += 1;
-
-            match classifier.classify(content) {
-                LineType::Pure => {
-                    stat.pure_removed += 1;
-                    stat.code_words_removed += count_words(content) as i64;
-                }
-                LineType::Comment => stat.comment_lines_removed += 1,
-                LineType::Docstring => stat.docstring_lines_removed += 1,
-                LineType::Blank => stat.blank_lines_removed += 1,
-            }
-        } else if line.starts_with(' ') {
-            // Context line
-            if !context_warning_printed {
-                eprintln!("Warning: Context line detected. Please use 'git diff --unified=0' for accurate results.");
-                context_warning_printed = true;
-            }
-        }
     }
 
     if let Some(file_stats) = current_file_stats.take() {
@@ -173,6 +164,52 @@ fn count_words(line: &str) -> usize {
     line.split_whitespace().count()
 }
 
+/// Classifies one added/removed line and updates `stat`.
+fn record(stat: &mut LangStats, classifier: &mut dyn Classifier, content: &str, added: bool) {
+    let words = count_words(content) as i64;
+    let (total, pure, words_stat, comment, docstring, blank) = if added {
+        (
+            &mut stat.total_added,
+            &mut stat.pure_added,
+            &mut stat.code_words_added,
+            &mut stat.comment_lines_added,
+            &mut stat.docstring_lines_added,
+            &mut stat.blank_lines_added,
+        )
+    } else {
+        (
+            &mut stat.total_removed,
+            &mut stat.pure_removed,
+            &mut stat.code_words_removed,
+            &mut stat.comment_lines_removed,
+            &mut stat.docstring_lines_removed,
+            &mut stat.blank_lines_removed,
+        )
+    };
+    *total += 1;
+    match classifier.classify(content) {
+        LineType::Pure => {
+            *pure += 1;
+            *words_stat += words;
+        }
+        LineType::Comment => *comment += 1,
+        LineType::Docstring => *docstring += 1,
+        LineType::Blank => *blank += 1,
+    }
+}
+
+/// Parses `@@ -a[,b] +c[,d] @@` into the (old, new) line counts; a missing count means 1.
+fn hunk_counts(header: &str) -> (usize, usize) {
+    let count = |prefix: char| {
+        header
+            .split_whitespace()
+            .find_map(|t| t.strip_prefix(prefix))
+            .map(|r| r.split_once(',').map_or(Some(1), |(_, n)| n.parse().ok()))
+            .map_or(0, |n| n.unwrap_or(0))
+    };
+    (count('-'), count('+'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,7 +222,7 @@ diff --git a/test.py b/test.py
 index 123..456 100644
 --- a/test.py
 +++ b/test.py
-@@ -1,3 +1,3 @@
+@@ -1,2 +1,2 @@
 -def foo():
 -# comment
 +def bar():
@@ -205,5 +242,43 @@ index 123..456 100644
         assert_eq!(lang_stats.total_added, 2);
         assert_eq!(lang_stats.pure_removed, 1);
         assert_eq!(lang_stats.pure_added, 2);
+    }
+
+    #[test]
+    fn test_content_resembling_headers_is_counted() {
+        // `-- x` removed => "--- x"; `++i;` added => "+++i;"; both look like file headers.
+        let diff_input = "\
+diff --git a/a.c b/a.c
+--- a/a.c
++++ b/a.c
+@@ -2,2 +2,2 @@
+-*p = 1;
+--- x
+++++i;
++*p = 2;
+diff --git a/b.py b/b.py
+--- a/b.py
++++ b/b.py
+@@ -1 +1 @@
+-a = 1
+\\ No newline at end of file
++a = 2
+";
+        let mut stats = Vec::new();
+        parse_diff(Cursor::new(diff_input), &mut stats).unwrap();
+
+        assert_eq!(stats.len(), 2);
+        let c = &stats[0].lang_stats;
+        assert_eq!((c.total_added, c.total_removed), (2, 2));
+        // `*p = 1;` is code, `-- x` is code in C; nothing is a comment.
+        assert_eq!((c.pure_added, c.pure_removed), (2, 2));
+        let py = &stats[1].lang_stats;
+        assert_eq!((py.pure_added, py.pure_removed), (1, 1));
+    }
+
+    #[test]
+    fn test_hunk_counts() {
+        assert_eq!(hunk_counts("@@ -1,3 +4 @@ fn x()"), (3, 1));
+        assert_eq!(hunk_counts("@@ -0,0 +1,5 @@"), (0, 5));
     }
 }

@@ -49,14 +49,14 @@ cargo install --path .
 Analyzes the changes between two git references.
 
 ```bash
-# Analyze changes between main and HEAD
+# Analyze changes on HEAD since it diverged from main (git diff base...head)
 purecode diff --base origin/main --head HEAD
 
 # Shortcut (uses default origin/main -> HEAD)
 purecode
 
 # Read diff from stdin
-git diff origin/main | purecode diff --stdin
+git diff --unified=0 origin/main | purecode diff --stdin
 ```
 
 ### Files Mode (Snapshot)
@@ -70,9 +70,11 @@ purecode files
 # Analyze specific directories
 purecode files src/ lib/
 
-# Exclude node_modules (respected by default, but customizable)
-purecode files --exclude "**/node_modules/**"
+# Skip files via .purecode.toml (see Configuration); node_modules, target, dist,
+# .git and *.lock are excluded by default
 ```
+
+When stdin is used (`purecode files --stdin`), one file path per line is read and include/exclude are not applied.
 
 ### Options
 
@@ -99,10 +101,18 @@ warn_only = false
 ci = false
 
 include = ["src/**"]
-exclude = ["**/*.lock", "dist/**", "target/**", "node_modules/**"]
+exclude = ["**/*.lock", "**/dist/**", "**/target/**", "**/node_modules/**"]
 ```
 
-CLI flags always override configuration values.
+CLI flags always override configuration values. `include`/`exclude` are glob patterns matched against the path as scanned (`./` stripped); use a `**/` prefix to match at any depth.
+
+## Exit Codes
+
+| Code | Meaning |
+| ---- | ------- |
+| 0 | Success (or threshold failure with `--warn-only`) |
+| 1 | Runtime error (e.g. `git diff` failed, bad input) |
+| 2 | A threshold check failed |
 
 ## Integration
 
@@ -113,10 +123,10 @@ Add to `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/isupervillain/purecode
-    rev: v0.2.0
+    rev: v0.2.2
     hooks:
       - id: purecode
-        args: ["--stdin", "--format", "human"]
+        args: ["--format", "human"]
 ```
 
 ### GitHub Actions
@@ -174,7 +184,7 @@ PURECODE_FAIL reason=noise_ratio_exceeded noise_ratio=0.62 max_noise_ratio=0.50
 
 ## Contributing
 
-1. Clone the repository: `git clone https://github.com/isupervillain/purecode-priv`
+1. Clone the repository: `git clone https://github.com/isupervillain/purecode`
 2. Run tests: `cargo test`
 3. Submit a PR.
 
