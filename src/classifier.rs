@@ -125,46 +125,82 @@ impl Classifier for CStyleClassifier {
             return LineType::Blank;
         }
 
-        if self.in_block {
-            if trimmed.contains("*/") {
-                self.in_block = false;
-            }
-            return LineType::Comment;
-        }
-
-        if trimmed.starts_with("//") {
-            return LineType::Comment;
-        }
-
         // Mid-block line of a hunk that started inside a comment (`* text`, `*`, `*/`), not `*ptr`.
-        if trimmed == "*" || trimmed.starts_with("* ") || trimmed.starts_with("*/") {
+        if !self.in_block
+            && (trimmed == "*" || trimmed.starts_with("* ") || trimmed.starts_with("*/"))
+        {
             return LineType::Comment;
         }
 
-        if let Some(start_idx) = trimmed.find("/*") {
-            if let Some(end_idx) = trimmed.find("*/") {
-                if end_idx > start_idx {
-                    // Single-line block comment. Check for code before or after.
-                    let before = &trimmed[..start_idx];
-                    let after = &trimmed[end_idx + 2..];
-                    if !before.trim().is_empty() || !after.trim().is_empty() {
-                        return LineType::Pure;
+        // Scan so comment markers inside string/char literals (e.g. "**/*") are ignored.
+        let chars: Vec<char> = trimmed.chars().collect();
+        let mut has_code = false;
+        let mut quote: Option<char> = None;
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            let next = chars.get(i + 1).copied();
+            if self.in_block {
+                if c == '*' && next == Some('/') {
+                    self.in_block = false;
+                    i += 1;
+                }
+            } else if let Some(q) = quote {
+                has_code = true;
+                if c == '\\' {
+                    i += 1;
+                } else if c == q {
+                    quote = None;
+                }
+            } else if c == '/' && next == Some('/') {
+                break;
+            } else if c == '/' && next == Some('*') {
+                self.in_block = true;
+                i += 1;
+            } else {
+                if !c.is_whitespace() {
+                    has_code = true;
+                }
+                let prev_is_ident =
+                    i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_');
+                if c == 'r' && !prev_is_ident && is_raw_string_start(&chars[i + 1..]) {
+                    // Rust raw string r#"..."#: skip to its closer on this line (else rest of line).
+                    let hashes = chars[i + 1..].iter().take_while(|&&x| x == '#').count();
+                    let body = i + hashes + 2;
+                    let closer: Vec<char> = std::iter::once('"')
+                        .chain(std::iter::repeat_n('#', hashes))
+                        .collect();
+                    i = (body..chars.len())
+                        .find(|&j| chars[j..].starts_with(&closer))
+                        .map_or(chars.len(), |j| j + closer.len() - 1);
+                } else if c == '"' || c == '`' {
+                    quote = Some(c);
+                } else if c == '\'' {
+                    // Char literal ('"', '\n'); a lone `'` (lifetime) falls through as code.
+                    if next == Some('\\') {
+                        i += chars[i + 1..]
+                            .iter()
+                            .position(|&x| x == '\'')
+                            .map_or(0, |p| p + 1);
+                    } else if chars.get(i + 2) == Some(&'\'') {
+                        i += 2;
                     }
-                    return LineType::Comment;
                 }
             }
-            // Starts but doesn't end on same line. Check for code before /*.
-            let before = &trimmed[..start_idx];
-            if !before.trim().is_empty() {
-                self.in_block = true;
-                return LineType::Pure;
-            }
-            self.in_block = true;
-            return LineType::Comment;
+            i += 1;
         }
 
-        LineType::Pure
+        if has_code {
+            LineType::Pure
+        } else {
+            LineType::Comment
+        }
     }
+}
+
+fn is_raw_string_start(rest: &[char]) -> bool {
+    let hashes = rest.iter().take_while(|&&x| x == '#').count();
+    rest.get(hashes) == Some(&'"')
 }
 
 pub struct ShellClassifier;
@@ -339,6 +375,23 @@ mod tests {
         assert_eq!(c.classify("*p = 1;"), LineType::Pure);
         assert_eq!(c.classify("* continued doc line"), LineType::Comment);
         assert_eq!(c.classify("*/"), LineType::Comment);
+    }
+
+    #[test]
+    fn test_cstyle_markers_in_strings_are_code() {
+        let mut c = CStyleClassifier::new();
+        assert_eq!(
+            c.classify(r#"let g = vec!["**/*".to_string()];"#),
+            LineType::Pure
+        );
+        assert_eq!(c.classify("let a = 1;"), LineType::Pure); // not swallowed as a block
+        assert_eq!(c.classify(r#"let s = "// not a comment";"#), LineType::Pure);
+        assert_eq!(c.classify(r#"let q = '"'; // trailing"#), LineType::Pure);
+        assert_eq!(c.classify("x = 1; /* start"), LineType::Pure);
+        assert_eq!(c.classify("still comment"), LineType::Comment);
+        assert_eq!(c.classify("end */ y = 2;"), LineType::Pure);
+        assert_eq!(c.classify("/* a */ /* b */"), LineType::Comment);
+        assert_eq!(c.classify("fn f<'a>(x: &'a str) {}"), LineType::Pure);
     }
 
     #[test]
