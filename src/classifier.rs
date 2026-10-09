@@ -31,84 +31,154 @@ impl Default for PythonClassifier {
 }
 
 pub struct PythonClassifier {
-    in_triple_double: bool,
-    in_triple_single: bool,
+    /// Open triple-quoted string: its delimiter, and whether it is a docstring (true) or data.
+    open: Option<(&'static str, bool)>,
 }
 
 impl PythonClassifier {
     pub fn new() -> Self {
-        Self {
-            in_triple_double: false,
-            in_triple_single: false,
-        }
+        Self { open: None }
     }
 }
 
 impl Classifier for PythonClassifier {
     fn classify(&mut self, line: &str) -> LineType {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+        let t = line.trim();
+        if t.is_empty() {
             return LineType::Blank;
         }
+        let bytes = t.as_bytes();
+        let (mut has_code, mut has_doc) = (false, false);
+        let mut i = 0;
 
-        if self.in_triple_double {
-            if trimmed.contains("\"\"\"") {
-                self.in_triple_double = false;
-            }
-            return LineType::Docstring;
-        }
-        if self.in_triple_single {
-            if trimmed.contains("'''") {
-                self.in_triple_single = false;
-            }
-            return LineType::Docstring;
-        }
-
-        if trimmed.starts_with('#') {
-            return LineType::Comment;
-        }
-
-        if let Some(idx) = trimmed.find("\"\"\"") {
-            if trimmed.matches("\"\"\"").count() >= 2 {
-                // Single-line docstring. Check for code before or after.
-                let before = &trimmed[..idx];
-                let after = &trimmed[idx + 3..];
-                if !before.trim().is_empty() || !after.trim().is_empty() {
-                    return LineType::Pure;
-                }
-                return LineType::Docstring;
+        if let Some((delim, doc)) = self.open {
+            let Some(j) = t.find(delim) else {
+                return if doc {
+                    LineType::Docstring
+                } else {
+                    LineType::Pure
+                };
+            };
+            self.open = None;
+            i = j + 3;
+            if doc {
+                has_doc = true;
             } else {
-                self.in_triple_double = true;
-                return LineType::Docstring;
+                has_code = true;
             }
+        } else if t.starts_with("#!") {
+            return LineType::Pure; // shebang
         }
 
-        if let Some(idx) = trimmed.find("'''") {
-            if trimmed.matches("'''").count() >= 2 {
-                // Single-line docstring. Check for code before or after.
-                let before = &trimmed[..idx];
-                let after = &trimmed[idx + 3..];
-                if !before.trim().is_empty() || !after.trim().is_empty() {
-                    return LineType::Pure;
+        // Start of text since the last string/docstring that is not attributed yet.
+        let mut seg = i;
+        let mut quote: Option<u8> = None;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if let Some(q) = quote {
+                if c == b'\\' {
+                    i += 2;
+                    continue;
                 }
-                return LineType::Docstring;
+                if c == q {
+                    quote = None;
+                }
+                i += 1;
+                continue;
+            }
+            if c == b'#' {
+                break;
+            }
+            // Byte-wise compare: `i` may sit inside a multi-byte char, where `t[i..]` would panic.
+            let delim = if bytes[i..].starts_with(b"\"\"\"") {
+                "\"\"\""
+            } else if bytes[i..].starts_with(b"'''") {
+                "'''"
             } else {
-                self.in_triple_single = true;
-                return LineType::Docstring;
+                if c == b'"' || c == b'\'' {
+                    quote = Some(c);
+                }
+                i += 1;
+                continue;
+            };
+            // A statement-level triple-quoted string (only an r/u/b prefix before it) is a
+            // docstring; anything else (`x = """`, `f"""`, `help="""`) is data, i.e. code.
+            let pre = &t[seg..i];
+            let prefix_len = pre
+                .bytes()
+                .rev()
+                .take_while(|b| b"rRuUbBfF".contains(b))
+                .count();
+            let (head, prefix) = if prefix_len <= 2 {
+                pre.split_at(pre.len() - prefix_len)
+            } else {
+                (pre, "")
+            };
+            if !head.trim().is_empty() {
+                has_code = true;
+            }
+            let doc = !has_code && !prefix.contains(['f', 'F']);
+            if doc {
+                has_doc = true;
+            } else {
+                has_code = true;
+            }
+            match t[i + 3..].find(delim) {
+                Some(j) => {
+                    i += 3 + j + 3;
+                    seg = i;
+                }
+                None => {
+                    self.open = Some((delim, doc));
+                    i = bytes.len();
+                    seg = i;
+                }
             }
         }
+        let end = i.min(t.len());
+        if !t[seg.min(end)..end].trim().is_empty() {
+            has_code = true;
+        }
 
-        LineType::Pure
+        if has_code {
+            LineType::Pure
+        } else if has_doc {
+            LineType::Docstring
+        } else {
+            LineType::Comment
+        }
     }
 }
 
 pub struct CStyleClassifier {
     in_block: bool,
+    /// Closer of a string literal that can span lines (template literal, text block, raw string),
+    /// and whether backslash escapes apply inside it.
+    open_string: Option<(String, bool)>,
+    /// Rust: `'` starts a char literal or a lifetime, never a string.
+    char_literals: bool,
+    /// Brace depth inside each open `${...}` template-literal interpolation (innermost last).
+    interpolations: Vec<usize>,
+    /// No code line seen yet: a diff hunk may begin in the middle of a block comment.
+    at_start: bool,
 }
 
 impl CStyleClassifier {
     pub fn new() -> Self {
-        Self { in_block: false }
+        Self {
+            in_block: false,
+            open_string: None,
+            char_literals: false,
+            interpolations: Vec::new(),
+            at_start: true,
+        }
+    }
+
+    pub fn rust() -> Self {
+        Self {
+            char_literals: true,
+            ..Self::new()
+        }
     }
 }
 
@@ -125,14 +195,21 @@ impl Classifier for CStyleClassifier {
             return LineType::Blank;
         }
 
-        // Mid-block line of a hunk that started inside a comment (`* text`, `*`, `*/`), not `*ptr`.
-        if !self.in_block
-            && (trimmed == "*" || trimmed.starts_with("* ") || trimmed.starts_with("*/"))
-        {
-            return LineType::Comment;
+        // A diff hunk can begin inside a block comment (`* text`, `*`, `*/`). Only guess that at
+        // the start: later, `* x;` is a wrapped expression and `* {` a CSS selector.
+        if self.at_start {
+            let mid_block =
+                (trimmed == "*" || trimmed.starts_with("* ") || trimmed.starts_with("*/"))
+                    && !trimmed.ends_with(['{', ';'])
+                    && !(trimmed.contains('{') && trimmed.contains(';'));
+            if mid_block {
+                self.at_start = !trimmed.contains("*/");
+                return LineType::Comment;
+            }
+            self.at_start = false;
         }
 
-        // Scan so comment markers inside string/char literals (e.g. "**/*") are ignored.
+        // Scan so comment markers inside literals (e.g. "**/*", '/**', `/* x */`) are ignored.
         let chars: Vec<char> = trimmed.chars().collect();
         let mut has_code = false;
         let mut quote: Option<char> = None;
@@ -140,7 +217,24 @@ impl Classifier for CStyleClassifier {
         while i < chars.len() {
             let c = chars[i];
             let next = chars.get(i + 1).copied();
-            if self.in_block {
+            if let Some((closer, escapes)) = &self.open_string {
+                has_code = true;
+                if *escapes && c == '\\' {
+                    i += 2;
+                    continue;
+                }
+                if closer == "`" && c == '$' && next == Some('{') {
+                    self.open_string = None;
+                    self.interpolations.push(0);
+                    i += 2;
+                    continue;
+                }
+                if starts_with(&chars[i..], closer) {
+                    i += closer.chars().count();
+                    self.open_string = None;
+                    continue;
+                }
+            } else if self.in_block {
                 if c == '*' && next == Some('/') {
                     self.in_block = false;
                     i += 1;
@@ -163,20 +257,47 @@ impl Classifier for CStyleClassifier {
                 }
                 let prev_is_ident =
                     i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_');
-                if c == 'r' && !prev_is_ident && is_raw_string_start(&chars[i + 1..]) {
-                    // Rust raw string r#"..."#: skip to its closer on this line (else rest of line).
+                if let Some(depth) = self.interpolations.last_mut() {
+                    if c == '{' {
+                        *depth += 1;
+                    } else if c == '}' {
+                        if *depth == 0 {
+                            self.interpolations.pop();
+                            self.open_string = Some(("`".into(), true));
+                        } else {
+                            *depth -= 1;
+                        }
+                    }
+                }
+                if c == '\\' {
+                    // Outside literals only line continuations use `\`.
+                    i += 1;
+                } else if let Some(end) = regex_literal_end(&chars, i) {
+                    // JS regex literal (/"""/g, /`[^`]*`/): its contents are not literal delimiters.
+                    i = end;
+                } else if starts_with(&chars[i..], "\"\"\"") {
+                    // Text block / raw string (Java, Kotlin, Swift, Scala, C#).
+                    self.open_string = Some(("\"\"\"".into(), true));
+                    i += 2;
+                } else if c == '`' {
+                    // Template literal (JS/TS) or raw string (Go).
+                    self.open_string = Some(("`".into(), true));
+                } else if self.char_literals
+                    && c == 'r'
+                    && !prev_is_ident
+                    && is_raw_string_start(&chars[i + 1..])
+                {
+                    // Rust raw string r#"..."#.
                     let hashes = chars[i + 1..].iter().take_while(|&&x| x == '#').count();
-                    let body = i + hashes + 2;
-                    let closer: Vec<char> = std::iter::once('"')
+                    let closer: String = std::iter::once('"')
                         .chain(std::iter::repeat_n('#', hashes))
                         .collect();
-                    i = (body..chars.len())
-                        .find(|&j| chars[j..].starts_with(&closer))
-                        .map_or(chars.len(), |j| j + closer.len() - 1);
-                } else if c == '"' || c == '`' {
+                    self.open_string = Some((closer, false));
+                    i += hashes + 1;
+                } else if c == '"' || (c == '\'' && !self.char_literals) {
                     quote = Some(c);
                 } else if c == '\'' {
-                    // Char literal ('"', '\n'); a lone `'` (lifetime) falls through as code.
+                    // Rust char literal ('"', '\n'); a lone `'` (lifetime) falls through as code.
                     if next == Some('\\') {
                         i += chars[i + 1..]
                             .iter()
@@ -198,6 +319,36 @@ impl Classifier for CStyleClassifier {
     }
 }
 
+fn starts_with(chars: &[char], s: &str) -> bool {
+    let mut it = chars.iter();
+    s.chars().all(|c| it.next() == Some(&c))
+}
+
+/// Index of the closing `/` if a regex literal starts at `start`; `None` means division.
+/// A `/` starts a regex only after an operator, an opening bracket, or at the start of the line.
+fn regex_literal_end(chars: &[char], start: usize) -> Option<usize> {
+    if chars[start] != '/' {
+        return None;
+    }
+    let prev = chars[..start].iter().rev().find(|c| !c.is_whitespace());
+    if prev.is_some_and(|p| !"(,=:[!&|?{};".contains(*p)) {
+        return None;
+    }
+    let mut in_class = false;
+    let mut j = start + 1;
+    while j < chars.len() {
+        match chars[j] {
+            '\\' => j += 1,
+            '[' => in_class = true,
+            ']' => in_class = false,
+            '/' if !in_class => return (j > start + 1).then_some(j),
+            _ => {}
+        }
+        j += 1;
+    }
+    None
+}
+
 fn is_raw_string_start(rest: &[char]) -> bool {
     let hashes = rest.iter().take_while(|&&x| x == '#').count();
     rest.get(hashes) == Some(&'"')
@@ -210,7 +361,7 @@ impl Classifier for ShellClassifier {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             LineType::Blank
-        } else if trimmed.starts_with('#') {
+        } else if trimmed.starts_with('#') && !trimmed.starts_with("#!") {
             LineType::Comment
         } else {
             LineType::Pure
@@ -248,7 +399,7 @@ impl Classifier for RubyClassifier {
             return LineType::Comment;
         }
 
-        if trimmed.starts_with('#') {
+        if trimmed.starts_with('#') && !trimmed.starts_with("#!") {
             return LineType::Comment;
         }
 
@@ -261,14 +412,18 @@ impl Classifier for RubyClassifier {
     }
 }
 
-// Updated HTML/Vue Classifier to handle multi-line comments
 pub struct HtmlClassifier {
     in_comment: bool,
+    /// Classifier for the body of an open `<script>`/`<style>` element, and its closing tag.
+    embedded: Option<(CStyleClassifier, &'static str)>,
 }
 
 impl HtmlClassifier {
     pub fn new() -> Self {
-        Self { in_comment: false }
+        Self {
+            in_comment: false,
+            embedded: None,
+        }
     }
 }
 
@@ -284,7 +439,32 @@ impl Classifier for HtmlClassifier {
         if trimmed.is_empty() {
             return LineType::Blank;
         }
+        let lower = trimmed.to_ascii_lowercase();
 
+        if let Some((inner, close)) = &mut self.embedded {
+            if lower.contains(*close) {
+                self.embedded = None;
+                return LineType::Pure;
+            }
+            return inner.classify(line);
+        }
+
+        let kind = self.classify_markup(trimmed);
+        if !self.in_comment && kind == LineType::Pure {
+            for (open, close) in [("<script", "</script>"), ("<style", "</style>")] {
+                if let Some(p) = lower.rfind(open) {
+                    if !lower[p..].contains(close) {
+                        self.embedded = Some((CStyleClassifier::new(), close));
+                    }
+                }
+            }
+        }
+        kind
+    }
+}
+
+impl HtmlClassifier {
+    fn classify_markup(&mut self, trimmed: &str) -> LineType {
         if self.in_comment {
             if let Some(idx) = trimmed.find("-->") {
                 // Check if there is code after comment end
@@ -346,8 +526,8 @@ pub fn get_classifier(lang: Language) -> Box<dyn Classifier> {
         | Language::Swift
         | Language::Kotlin
         | Language::Scala
-        | Language::Css
-        | Language::Rust => Box::new(CStyleClassifier::new()),
+        | Language::Css => Box::new(CStyleClassifier::new()),
+        Language::Rust => Box::new(CStyleClassifier::rust()),
         Language::Shell | Language::PowerShell | Language::Yaml | Language::Toml => {
             Box::new(ShellClassifier)
         }
@@ -373,8 +553,124 @@ mod tests {
     fn test_cstyle_pointer_deref_is_code() {
         let mut c = CStyleClassifier::new();
         assert_eq!(c.classify("*p = 1;"), LineType::Pure);
-        assert_eq!(c.classify("* continued doc line"), LineType::Comment);
-        assert_eq!(c.classify("*/"), LineType::Comment);
+        // After code, a leading `*` is an expression continuation or a selector, not a comment.
+        assert_eq!(c.classify("* tab_size as f64) as f32;"), LineType::Pure);
+        assert_eq!(c.classify("* {"), LineType::Pure);
+    }
+
+    #[test]
+    fn test_cstyle_hunk_starting_mid_block_comment() {
+        let mut c = CStyleClassifier::new();
+        assert_eq!(c.classify(" * continued doc line"), LineType::Comment);
+        assert_eq!(c.classify(" * @param x"), LineType::Comment);
+        assert_eq!(c.classify(" */"), LineType::Comment);
+        assert_eq!(c.classify("fn f() {}"), LineType::Pure);
+        // A hunk that starts with a CSS universal selector is code.
+        assert_eq!(CStyleClassifier::new().classify("* {"), LineType::Pure);
+        assert_eq!(
+            CStyleClassifier::new().classify("* { margin: 0; }"),
+            LineType::Pure
+        );
+    }
+
+    #[test]
+    fn test_js_strings_regexes_and_templates() {
+        let mut c = CStyleClassifier::new();
+        assert_eq!(c.classify("pathname: '/**',"), LineType::Pure);
+        assert_eq!(c.classify("port: '',"), LineType::Pure); // not swallowed by a block
+        assert_eq!(c.classify(r#"s.replace(/"""/g, '\\"');"#), LineType::Pure);
+        assert_eq!(c.classify("// real comment"), LineType::Comment);
+        assert_eq!(c.classify("const re = /`([^`]*)`/g;"), LineType::Pure);
+        assert_eq!(c.classify("// still a comment"), LineType::Comment);
+        assert_eq!(c.classify("const x = a / b / c;"), LineType::Pure);
+        // Multi-line template literal: its lines are code even if they look like comments.
+        assert_eq!(c.classify("const css = `"), LineType::Pure);
+        assert_eq!(c.classify("/* not a comment */"), LineType::Pure);
+        assert_eq!(c.classify("`;"), LineType::Pure);
+        assert_eq!(c.classify("// comment again"), LineType::Comment);
+        // Comments inside a multi-line `${...}` interpolation are comments.
+        assert_eq!(c.classify("return `head ${join(["), LineType::Pure);
+        assert_eq!(c.classify("  // why this entry"), LineType::Comment);
+        assert_eq!(c.classify("  { a: 1 },"), LineType::Pure);
+        assert_eq!(c.classify("])} tail`;"), LineType::Pure);
+        assert_eq!(c.classify("// after"), LineType::Comment);
+    }
+
+    #[test]
+    fn test_rust_raw_strings_and_lifetimes() {
+        let mut c = CStyleClassifier::rust();
+        assert_eq!(c.classify(r##"let s = r#"a "/*" b"#;"##), LineType::Pure);
+        assert_eq!(c.classify("let a = 1;"), LineType::Pure);
+        assert_eq!(c.classify("fn f<'a>(x: &'a str) {} // c"), LineType::Pure);
+        assert_eq!(c.classify("let q = '\"'; // c"), LineType::Pure);
+        assert_eq!(c.classify("// comment"), LineType::Comment);
+    }
+
+    #[test]
+    fn test_python_docstrings_vs_data_strings() {
+        let mut c = PythonClassifier::new();
+        assert_eq!(c.classify("#!/usr/bin/env python3"), LineType::Pure);
+        assert_eq!(
+            c.classify(r#""""One-line docstring.""""#),
+            LineType::Docstring
+        );
+        assert_eq!(c.classify(r#"r"""Raw docstring.""""#), LineType::Docstring);
+        assert_eq!(c.classify(r#""""Doc.""".strip()"#), LineType::Pure);
+        assert_eq!(c.classify(r#"""""#), LineType::Docstring);
+        assert_eq!(c.classify("    # inside docstring"), LineType::Docstring);
+        assert_eq!(c.classify(r#"""""#), LineType::Docstring);
+        // Assigned or f-string triple-quoted strings are data, i.e. code.
+        assert_eq!(c.classify(r#"query = f""""#), LineType::Pure);
+        assert_eq!(c.classify("SELECT 1 -- # not a comment"), LineType::Pure);
+        assert_eq!(c.classify(r#"""""#), LineType::Pure);
+        assert_eq!(c.classify(r##"x = "#" # real comment"##), LineType::Pure);
+        assert_eq!(c.classify(r#"s = '"""'"#), LineType::Pure);
+        assert_eq!(c.classify("y = 2"), LineType::Pure); // not swallowed by a string
+    }
+
+    #[test]
+    fn test_non_ascii_text_does_not_panic() {
+        let mut py = PythonClassifier::new();
+        assert_eq!(py.classify("x = 'a — b' # é"), LineType::Pure);
+        assert_eq!(py.classify("café = 'midas' — rest"), LineType::Pure);
+        assert_eq!(
+            py.classify("serialised directly — no wrapper"),
+            LineType::Pure
+        );
+        assert_eq!(
+            py.classify(r#""""Adapter — real "x" impl.""""#),
+            LineType::Docstring
+        );
+        assert_eq!(py.classify(r#"s = "\— ü""#), LineType::Pure);
+        let mut c = CStyleClassifier::new();
+        assert_eq!(c.classify("const s = '— /* ü */'; // ñ"), LineType::Pure);
+        let mut h = HtmlClassifier::new();
+        assert_eq!(h.classify("<p>Ünïcödé — <!-- ç --></p>"), LineType::Pure);
+    }
+
+    #[test]
+    fn test_html_embedded_script_and_style() {
+        let mut c = HtmlClassifier::new();
+        assert_eq!(c.classify("<script>"), LineType::Pure);
+        assert_eq!(c.classify("// js comment"), LineType::Comment);
+        assert_eq!(c.classify("const a = '<!--';"), LineType::Pure);
+        assert_eq!(c.classify("</script>"), LineType::Pure);
+        assert_eq!(c.classify("<!-- html comment -->"), LineType::Comment);
+        assert_eq!(c.classify(r#"<style lang="scss">"#), LineType::Pure);
+        assert_eq!(c.classify("/* css */"), LineType::Comment);
+        assert_eq!(c.classify("* { margin: 0; }"), LineType::Pure);
+        assert_eq!(c.classify("</style>"), LineType::Pure);
+        assert_eq!(
+            c.classify(r#"<script src="x.js"></script>"#),
+            LineType::Pure
+        );
+        assert_eq!(c.classify("// text, not script"), LineType::Pure);
+    }
+
+    #[test]
+    fn test_shebang_is_code() {
+        assert_eq!(ShellClassifier.classify("#!/bin/sh"), LineType::Pure);
+        assert_eq!(ShellClassifier.classify("# comment"), LineType::Comment);
     }
 
     #[test]

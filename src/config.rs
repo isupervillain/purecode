@@ -34,6 +34,8 @@ fn default_include() -> Vec<String> {
 fn default_exclude() -> Vec<String> {
     vec![
         "**/*.lock".to_string(),
+        "**/package-lock.json".to_string(),
+        "**/pnpm-lock.yaml".to_string(),
         "**/dist/**".to_string(),
         "**/target/**".to_string(),
         "**/node_modules/**".to_string(),

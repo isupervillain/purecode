@@ -10,7 +10,6 @@ pub fn parse_diff<R: std::io::BufRead>(
 ) -> Result<(), std::io::Error> {
     let mut current_file_stats: Option<FileStats> = None;
     let mut classifier = get_classifier(Language::Other);
-    let mut is_binary_diff = false;
     let mut context_warning_printed = false;
     // Lines still owed by the current hunk. While non-zero, `---`/`+++` are content, not headers.
     let (mut old_left, mut new_left) = (0usize, 0usize);
@@ -19,6 +18,9 @@ pub fn parse_diff<R: std::io::BufRead>(
         let line = line_result?;
 
         if line.starts_with("diff --git ") {
+            // A new file starts; files without `---` headers (binary, mode-only) must not
+            // swallow the previous file's stats.
+            flush(&mut current_file_stats, stats);
             (old_left, new_left) = (0, 0);
         }
 
@@ -47,27 +49,14 @@ pub fn parse_diff<R: std::io::BufRead>(
             }
         }
 
-        // Detect binary files diff
+        // "Binary files a/foo and b/foo differ": nothing to count for this file.
         if line.starts_with("Binary files") && line.contains("differ") {
-            // "Binary files a/foo and b/foo differ"
-            // We should skip this file.
-            // If we already started tracking it (unlikely if this is the first line about it), clear it.
-            current_file_stats = None;
-            is_binary_diff = true;
+            flush(&mut current_file_stats, stats);
             continue;
         }
 
         if line.starts_with("--- ") {
-            // Save previous
-            if let Some(file_stats) = current_file_stats.take() {
-                if !is_binary_diff
-                    && (file_stats.lang_stats.total_added > 0
-                        || file_stats.lang_stats.total_removed > 0)
-                {
-                    stats.push(file_stats);
-                }
-            }
-            is_binary_diff = false;
+            flush(&mut current_file_stats, stats);
 
             let path_part = line.trim_start_matches("--- ").trim();
             if path_part == "/dev/null" {
@@ -134,30 +123,21 @@ pub fn parse_diff<R: std::io::BufRead>(
             }
             continue;
         }
-
-        // Ignore metadata
-        if line.starts_with("diff --git")
-            || line.starts_with("index ")
-            || line.starts_with("new file mode")
-            || line.starts_with("deleted file mode")
-        {
-            continue;
-        }
-
-        if is_binary_diff {
-            continue;
-        }
+        // Anything else outside a hunk is metadata (index, mode, rename, similarity lines).
     }
 
-    if let Some(file_stats) = current_file_stats.take() {
-        if !is_binary_diff
-            && (file_stats.lang_stats.total_added > 0 || file_stats.lang_stats.total_removed > 0)
-        {
-            stats.push(file_stats);
-        }
-    }
+    flush(&mut current_file_stats, stats);
 
     Ok(())
+}
+
+/// Moves the file being parsed into `stats` if any line of it was counted.
+fn flush(current: &mut Option<FileStats>, stats: &mut Vec<FileStats>) {
+    if let Some(fs) = current.take() {
+        if fs.lang_stats.total_added > 0 || fs.lang_stats.total_removed > 0 {
+            stats.push(fs);
+        }
+    }
 }
 
 fn count_words(line: &str) -> usize {
@@ -187,7 +167,7 @@ fn record(stat: &mut LangStats, classifier: &mut dyn Classifier, content: &str, 
         )
     };
     *total += 1;
-    match classifier.classify(content) {
+    match classifier.classify(content.trim_start_matches('\u{feff}')) {
         LineType::Pure => {
             *pure += 1;
             *words_stat += words;
@@ -274,6 +254,36 @@ diff --git a/b.py b/b.py
         assert_eq!((c.pure_added, c.pure_removed), (2, 2));
         let py = &stats[1].lang_stats;
         assert_eq!((py.pure_added, py.pure_removed), (1, 1));
+    }
+
+    #[test]
+    fn test_text_file_followed_by_binary_file_is_kept() {
+        let diff_input = "\
+diff --git a/a.ts b/a.ts
+--- a/a.ts
++++ b/a.ts
+@@ -1 +1,2 @@
+-  'x'
++  'x',
++  'y'
+diff --git a/i.png b/i.png
+new file mode 100644
+Binary files /dev/null and b/i.png differ
+diff --git a/b.ts b/b.ts
+old mode 100644
+new mode 100755
+";
+        let mut stats = Vec::new();
+        parse_diff(Cursor::new(diff_input), &mut stats).unwrap();
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].path, "a.ts");
+        assert_eq!(
+            (
+                stats[0].lang_stats.total_added,
+                stats[0].lang_stats.total_removed
+            ),
+            (2, 1)
+        );
     }
 
     #[test]

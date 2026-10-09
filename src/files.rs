@@ -2,10 +2,10 @@ use crate::classifier::{get_classifier, LineType};
 use crate::language::Language;
 use crate::stats::{FileStats, LangStats};
 use glob::Pattern;
+use ignore::WalkBuilder;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use walkdir::WalkDir;
 
 pub fn analyze_files(
     paths: &[String],
@@ -42,11 +42,18 @@ pub fn analyze_files(
         .collect();
 
     for root in paths {
-        for entry in WalkDir::new(root).into_iter().flatten() {
-            let path = entry.path();
-            if path.is_dir() {
+        // Respects .gitignore/.ignore (so build output is skipped without being walked);
+        // hidden files like .github/ are still analyzed.
+        let walker = WalkBuilder::new(root)
+            .hidden(false)
+            .require_git(false)
+            .filter_entry(|e| e.file_name() != ".git")
+            .build();
+        for entry in walker.flatten() {
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
                 continue;
             }
+            let path = entry.path();
 
             let path_str = path.to_string_lossy();
             let clean_path = if let Some(stripped) = path_str.strip_prefix("./") {
@@ -93,7 +100,7 @@ fn process_file(path: &Path) -> Result<FileStats, std::io::Error> {
         match line_result {
             Ok(line) => {
                 lang_stats.total_added += 1; // Snapshot mode: everything is added
-                match classifier.classify(&line) {
+                match classifier.classify(line.trim_start_matches('\u{feff}')) {
                     LineType::Pure => {
                         lang_stats.pure_added += 1;
                         lang_stats.code_words_added += line.split_whitespace().count() as i64;
@@ -131,4 +138,53 @@ fn is_binary(path: &Path) -> Result<bool, std::io::Error> {
         return Ok(true);
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use std::fs;
+
+    #[test]
+    fn walk_respects_gitignore_and_default_excludes() {
+        let root = std::env::temp_dir().join(format!("purecode-walk-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for (path, body) in [
+            (".gitignore", "build/\n"),
+            ("build/gen.js", "x();\n"),
+            ("src/a.js", "a();\n// c\n"),
+            (".github/ci.yml", "on: push\n"),
+            (".git/config", "[core]\n"),
+            ("web/node_modules/m.js", "m();\n"),
+            ("package-lock.json", "{}\n"),
+        ] {
+            let p = root.join(path);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, body).unwrap();
+        }
+
+        let config = Config::default();
+        let stats = analyze_files(
+            &[root.to_string_lossy().into_owned()],
+            &config.include,
+            &config.exclude,
+            None,
+        )
+        .unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        let mut found: Vec<String> = stats
+            .iter()
+            .map(|f| {
+                Path::new(&f.path)
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        found.sort();
+        assert_eq!(found, [".github/ci.yml", ".gitignore", "src/a.js"]);
+    }
 }

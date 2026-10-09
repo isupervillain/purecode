@@ -16,7 +16,7 @@ A fast, language-aware code analysis tool that distinguishes "pure code" from "n
 PureCode operates in a pipeline:
 
 1. **Parser**: Reads a git diff (Diff Mode) or file contents (Snapshot Mode).
-2. **Classifier**: A stateful engine that processes content line-by-line. It detects the language based on file extension and applies language-specific rules (e.g., Python triple-quotes, C-style block comments) to classify each line as `Pure`, `Comment`, `Docstring`, or `Blank`.
+2. **Classifier**: A stateful engine that processes content line-by-line. It detects the language based on file extension and applies language-specific rules to classify each line as `Pure`, `Comment`, `Docstring`, or `Blank`. Comment markers inside string, template and regex literals are ignored; Python docstrings are told apart from triple-quoted data strings; `<script>`/`<style>` blocks in HTML and Vue use C-style rules. A line with any code on it is `Pure`; shebangs count as code.
 3. **Stats Aggregator**: Accumulates metrics per file and per language.
 4. **Reporter**: Outputs the data in the requested format (Human, JSON, Plain).
 
@@ -70,9 +70,10 @@ purecode files
 # Analyze specific directories
 purecode files src/ lib/
 
-# Skip files via .purecode.toml (see Configuration); node_modules, target, dist,
-# .git and *.lock are excluded by default
+# Skip more files via .purecode.toml (see Configuration)
 ```
+
+Files matched by `.gitignore`/`.ignore` are skipped (ignored directories such as build output are never walked), as are binary files, `.git/`, `node_modules`, `target`, `dist` and lock files (`*.lock`, `package-lock.json`, `pnpm-lock.yaml`). Hidden files such as `.github/` workflows are analyzed. Files in an unrecognized language are counted under `Other`, with every non-blank line as pure.
 
 When stdin is used (`purecode files --stdin`), one file path per line is read and include/exclude are not applied.
 
