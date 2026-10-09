@@ -41,10 +41,17 @@ pub fn analyze_files(
         .filter_map(|p| Pattern::new(p).ok())
         .collect();
 
+    let cwd = std::env::current_dir()?.canonicalize()?;
     for root in paths {
+        let root = Path::new(root).canonicalize().map_err(|e| {
+            std::io::Error::new(e.kind(), format!("cannot read path '{root}': {e}"))
+        })?;
+        // Patterns are relative to the project (the working directory) or, for a root outside
+        // it, to that root; directories above it (e.g. /builds/target/app) never match.
+        let base = if root.starts_with(&cwd) { &cwd } else { &root };
         // Respects .gitignore/.ignore (so build output is skipped without being walked);
         // hidden files like .github/ are still analyzed.
-        let walker = WalkBuilder::new(root)
+        let walker = WalkBuilder::new(&root)
             .hidden(false)
             .require_git(false)
             .filter_entry(|e| e.file_name() != ".git")
@@ -54,23 +61,22 @@ pub fn analyze_files(
                 continue;
             }
             let path = entry.path();
-
-            let path_str = path.to_string_lossy();
-            let clean_path = if let Some(stripped) = path_str.strip_prefix("./") {
-                stripped
-            } else {
-                &path_str
+            let rel = match path.strip_prefix(base) {
+                Ok(r) if !r.as_os_str().is_empty() => r,
+                _ => Path::new(path.file_name().unwrap_or_default()), // root is the file itself
             };
 
-            if exclude_patterns.iter().any(|p| p.matches(clean_path)) {
+            if exclude_patterns.iter().any(|p| p.matches_path(rel)) {
                 continue;
             }
 
-            if !include_patterns.iter().any(|p| p.matches(clean_path)) {
+            if !include_patterns.iter().any(|p| p.matches_path(rel)) {
                 continue;
             }
 
-            if let Ok(fs) = process_file(path) {
+            let shown = if base == &cwd { rel } else { path };
+            if let Ok(mut fs) = process_file(path) {
+                fs.path = shown.to_string_lossy().into_owned();
                 stats.push(fs);
             }
         }
@@ -90,32 +96,28 @@ fn process_file(path: &Path) -> Result<FileStats, std::io::Error> {
         ));
     }
 
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-
+    let mut reader = BufReader::new(File::open(path)?);
     let mut classifier = get_classifier(language);
     let mut lang_stats = LangStats::default();
+    let mut buf = Vec::new();
 
-    for line_result in reader.lines() {
-        match line_result {
-            Ok(line) => {
-                lang_stats.total_added += 1; // Snapshot mode: everything is added
-                match classifier.classify(line.trim_start_matches('\u{feff}')) {
-                    LineType::Pure => {
-                        lang_stats.pure_added += 1;
-                        lang_stats.code_words_added += line.split_whitespace().count() as i64;
-                    }
-                    LineType::Comment => lang_stats.comment_lines_added += 1,
-                    LineType::Docstring => lang_stats.docstring_lines_added += 1,
-                    LineType::Blank => lang_stats.blank_lines_added += 1,
-                }
+    loop {
+        buf.clear();
+        if reader.read_until(b'\n', &mut buf)? == 0 {
+            break;
+        }
+        // Latin-1 and other non-UTF-8 text is still code; decode it lossily instead of skipping.
+        let decoded = String::from_utf8_lossy(&buf);
+        let line = decoded.trim_end_matches(['\n', '\r']);
+        lang_stats.total_added += 1; // Snapshot mode: everything is added
+        match classifier.classify(line.trim_start_matches('\u{feff}')) {
+            LineType::Pure => {
+                lang_stats.pure_added += 1;
+                lang_stats.code_words_added += line.split_whitespace().count() as i64;
             }
-            Err(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Read error",
-                ))
-            }
+            LineType::Comment => lang_stats.comment_lines_added += 1,
+            LineType::Docstring => lang_stats.docstring_lines_added += 1,
+            LineType::Blank => lang_stats.blank_lines_added += 1,
         }
     }
 
@@ -148,22 +150,29 @@ mod tests {
 
     #[test]
     fn walk_respects_gitignore_and_default_excludes() {
-        let root = std::env::temp_dir().join(format!("purecode-walk-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        for (path, body) in [
-            (".gitignore", "build/\n"),
-            ("build/gen.js", "x();\n"),
-            ("src/a.js", "a();\n// c\n"),
-            (".github/ci.yml", "on: push\n"),
-            (".git/config", "[core]\n"),
-            ("web/node_modules/m.js", "m();\n"),
-            ("package-lock.json", "{}\n"),
-        ] {
+        // The root sits under a directory named `target`: ancestors must not trigger excludes.
+        let root = std::env::temp_dir()
+            .join(format!("purecode-walk-{}", std::process::id()))
+            .join("target")
+            .join("proj");
+        let _ = fs::remove_dir_all(root.parent().unwrap().parent().unwrap());
+        let files: [(&str, &[u8]); 8] = [
+            (".gitignore", b"build/\n"),
+            ("build/gen.js", b"x();\n"),
+            ("src/a.js", b"a();\n// c\n"),
+            (".github/ci.yml", b"on: push\n"),
+            (".git/config", b"[core]\n"),
+            ("web/node_modules/m.js", b"m();\n"),
+            ("package-lock.json", b"{}\n"),
+            ("latin1.py", b"x = 'caf\xe9'\r\n# c\r\n"), // not valid UTF-8
+        ];
+        for (path, body) in files {
             let p = root.join(path);
             fs::create_dir_all(p.parent().unwrap()).unwrap();
             fs::write(p, body).unwrap();
         }
 
+        let root_canonical = root.canonicalize().unwrap();
         let config = Config::default();
         let stats = analyze_files(
             &[root.to_string_lossy().into_owned()],
@@ -172,7 +181,8 @@ mod tests {
             None,
         )
         .unwrap();
-        fs::remove_dir_all(&root).unwrap();
+        fs::remove_dir_all(root.parent().unwrap().parent().unwrap()).unwrap();
+        let root = root_canonical;
 
         let mut found: Vec<String> = stats
             .iter()
@@ -185,6 +195,26 @@ mod tests {
             })
             .collect();
         found.sort();
-        assert_eq!(found, [".github/ci.yml", ".gitignore", "src/a.js"]);
+        assert_eq!(
+            found,
+            [".github/ci.yml", ".gitignore", "latin1.py", "src/a.js"]
+        );
+        let latin1 = stats
+            .iter()
+            .find(|f| f.path.ends_with("latin1.py"))
+            .unwrap();
+        assert_eq!(
+            (
+                latin1.lang_stats.pure_added,
+                latin1.lang_stats.comment_lines_added
+            ),
+            (1, 1)
+        );
+    }
+
+    #[test]
+    fn missing_root_is_an_error() {
+        let err = analyze_files(&["/nonexistent/purecode".into()], &[], &[], None).unwrap_err();
+        assert!(err.to_string().contains("/nonexistent/purecode"));
     }
 }

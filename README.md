@@ -16,7 +16,7 @@ A fast, language-aware code analysis tool that distinguishes "pure code" from "n
 PureCode operates in a pipeline:
 
 1. **Parser**: Reads a git diff (Diff Mode) or file contents (Snapshot Mode).
-2. **Classifier**: A stateful engine that processes content line-by-line. It detects the language based on file extension and applies language-specific rules to classify each line as `Pure`, `Comment`, `Docstring`, or `Blank`. Comment markers inside string, template and regex literals are ignored; Python docstrings are told apart from triple-quoted data strings; `<script>`/`<style>` blocks in HTML and Vue use C-style rules. A line with any code on it is `Pure`; shebangs count as code.
+2. **Classifier**: A stateful engine that processes content line-by-line. It detects the language based on file extension and applies language-specific rules to classify each line as `Pure`, `Comment`, `Docstring`, or `Blank`. Comment markers inside string, template and regex literals are ignored; a Python triple-quoted string is a docstring only when it starts a statement (`x = """…` is code); `<script>`/`<style>` blocks in HTML and Vue use C-style rules. A line with any code on it is `Pure`; shebangs count as code.
 3. **Stats Aggregator**: Accumulates metrics per file and per language.
 4. **Reporter**: Outputs the data in the requested format (Human, JSON, Plain).
 
@@ -73,7 +73,7 @@ purecode files src/ lib/
 # Skip more files via .purecode.toml (see Configuration)
 ```
 
-Files matched by `.gitignore`/`.ignore` are skipped (ignored directories such as build output are never walked), as are binary files, `.git/`, `node_modules`, `target`, `dist` and lock files (`*.lock`, `package-lock.json`, `pnpm-lock.yaml`). Hidden files such as `.github/` workflows are analyzed. Files in an unrecognized language are counted under `Other`, with every non-blank line as pure.
+Files ignored by git (`.gitignore` at any level, `.git/info/exclude`, the global gitignore) or by `.ignore` are skipped, and ignored directories such as build output are never walked. Also skipped: as are binary files, `.git/`, `node_modules`, `target`, `dist` and lock files (`*.lock`, `package-lock.json`, `pnpm-lock.yaml`). Hidden files such as `.github/` workflows are analyzed. Files in an unrecognized language are counted under `Other`, with every non-blank line as pure.
 
 When stdin is used (`purecode files --stdin`), one file path per line is read and include/exclude are not applied.
 
@@ -105,7 +105,9 @@ include = ["src/**"]
 exclude = ["**/*.lock", "**/dist/**", "**/target/**", "**/node_modules/**"]
 ```
 
-CLI flags always override configuration values. `include`/`exclude` are glob patterns matched against the path as scanned (`./` stripped); use a `**/` prefix to match at any depth.
+Setting `include` or `exclude` replaces its default list. Keys may also be written at the top level without the `[purecode]` header. Unknown keys, invalid values or unparsable TOML are an error (exit code 1), so a typo cannot silently disable a CI threshold.
+
+CLI flags always override configuration values. `include`/`exclude` are glob patterns matched against paths relative to the working directory (or, for a scanned path outside it, relative to that path); directories above it never match. Use a `**/` prefix to match at any depth.
 
 ## Exit Codes
 
@@ -113,7 +115,16 @@ CLI flags always override configuration values. `include`/`exclude` are glob pat
 | ---- | ------- |
 | 0 | Success (or threshold failure with `--warn-only`) |
 | 1 | Runtime error (e.g. `git diff` failed, bad input) |
-| 2 | A threshold check failed |
+| 2 | A threshold check failed, or invalid command-line usage |
+
+## Limitations
+
+Classification is heuristic, line-based, and needs no compiler. Known edge cases:
+
+- A diff hunk shows only part of a file, so a hunk that starts inside a block comment is recognised only by its leading `*` lines (`* text`, `*/`). A hunk whose first line is a wrapped `* operand` is counted as a comment.
+- A Python triple-quoted string that starts a line is treated as a docstring, even when it is a call argument.
+- Heredocs and code embedded in YAML (`run: |`) are classified by the host language's rules.
+- In JavaScript, a regex literal is recognised after an operator, an opening bracket or a keyword such as `return`; elsewhere `/` is division.
 
 ## Integration
 

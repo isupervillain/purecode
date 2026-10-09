@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default = "default_base")]
     pub base: String,
@@ -59,18 +60,38 @@ impl Default for Config {
     }
 }
 
-pub fn load_config() -> Config {
+/// Loads `.purecode.toml` from the working directory, or defaults when it is absent.
+///
+/// A config that cannot be read or parsed is an error: silently falling back to defaults
+/// would disable the thresholds a CI gate relies on.
+pub fn load_config() -> Result<Config, String> {
     let path = Path::new(".purecode.toml");
-    if path.exists() {
-        match fs::read_to_string(path) {
-            Ok(content) => match toml::from_str(&content) {
-                Ok(config) => return config,
-                Err(e) => eprintln!("Warning: Failed to parse .purecode.toml: {}", e),
-            },
-            Err(e) => eprintln!("Warning: Failed to read .purecode.toml: {}", e),
+    if !path.exists() {
+        return Ok(Config::default());
+    }
+    let content =
+        fs::read_to_string(path).map_err(|e| format!("Failed to read .purecode.toml: {e}"))?;
+    parse_config(&content).map_err(|e| format!("Invalid .purecode.toml: {e}"))
+}
+
+/// Accepts keys at the top level or under a `[purecode]` table.
+fn parse_config(content: &str) -> Result<Config, String> {
+    let mut table: toml::Table = toml::from_str(content).map_err(|e| e.to_string())?;
+    if table.len() == 1 {
+        if let Some(toml::Value::Table(inner)) = table.remove("purecode") {
+            table = inner;
         }
     }
-    Config::default()
+    let config: Config = toml::Value::Table(table)
+        .try_into()
+        .map_err(|e: toml::de::Error| e.to_string())?;
+    if !["human", "plain", "json"].contains(&config.format.as_str()) {
+        return Err(format!(
+            "format must be human, plain or json, got '{}'",
+            config.format
+        ));
+    }
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -78,7 +99,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_excludes_match_nested_and_absolute_paths() {
+    fn default_excludes_match_at_any_depth() {
         let excludes: Vec<glob::Pattern> = default_exclude()
             .iter()
             .map(|p| glob::Pattern::new(p).unwrap())
@@ -86,7 +107,25 @@ mod tests {
         let hit = |path: &str| excludes.iter().any(|p| p.matches(path));
         assert!(hit("target/debug/x"));
         assert!(hit("web/node_modules/a/b.js"));
-        assert!(hit("/tmp/repo/.git/config"));
+        assert!(hit(".git/config"));
         assert!(!hit("src/main.rs"));
+    }
+
+    #[test]
+    fn config_keys_at_top_level_or_under_purecode_table() {
+        let top = parse_config("base = \"main\"\nmax_noise_ratio = 0.5\n").unwrap();
+        let table = parse_config("[purecode]\nbase = \"main\"\nmax_noise_ratio = 0.5\n").unwrap();
+        for c in [top, table] {
+            assert_eq!(c.base, "main");
+            assert_eq!(c.max_noise_ratio, Some(0.5));
+            assert!(c.exclude.contains(&"**/node_modules/**".to_string()));
+        }
+    }
+
+    #[test]
+    fn invalid_config_is_rejected() {
+        assert!(parse_config("max_noise_ratoi = 0.5").is_err()); // typo
+        assert!(parse_config("format = \"xml\"").is_err());
+        assert!(parse_config("base = ").is_err());
     }
 }

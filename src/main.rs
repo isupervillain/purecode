@@ -177,7 +177,7 @@ struct FilesConfig {
 
 fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let config = config::load_config();
+    let config = config::load_config()?;
 
     let (stats, mode, active_config) = match cli.command {
         Some(Commands::Files {

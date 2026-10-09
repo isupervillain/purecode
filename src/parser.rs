@@ -9,13 +9,22 @@ pub fn parse_diff<R: std::io::BufRead>(
     stats: &mut Vec<FileStats>,
 ) -> Result<(), std::io::Error> {
     let mut current_file_stats: Option<FileStats> = None;
-    let mut classifier = get_classifier(Language::Other);
+    // Removed and added lines are separate texts; each side needs its own comment/string state.
+    let (mut old_classifier, mut new_classifier) = classifiers(Language::Other);
     let mut context_warning_printed = false;
     // Lines still owed by the current hunk. While non-zero, `---`/`+++` are content, not headers.
     let (mut old_left, mut new_left) = (0usize, 0usize);
+    let mut reader = reader;
+    let mut buf = Vec::new();
 
-    for line_result in reader.lines() {
-        let line = line_result?;
+    loop {
+        buf.clear();
+        if reader.read_until(b'\n', &mut buf)? == 0 {
+            break;
+        }
+        // Diffs of Latin-1 (or otherwise non-UTF-8) files must not abort the whole run.
+        let decoded = String::from_utf8_lossy(&buf);
+        let line = decoded.trim_end_matches(['\n', '\r']);
 
         if line.starts_with("diff --git ") {
             // A new file starts; files without `---` headers (binary, mode-only) must not
@@ -29,11 +38,21 @@ pub fn parse_diff<R: std::io::BufRead>(
                 match line.as_bytes().first() {
                     Some(b'-') => {
                         old_left = old_left.saturating_sub(1);
-                        record(&mut fs.lang_stats, classifier.as_mut(), &line[1..], false);
+                        record(
+                            &mut fs.lang_stats,
+                            old_classifier.as_mut(),
+                            &line[1..],
+                            false,
+                        );
                     }
                     Some(b'+') => {
                         new_left = new_left.saturating_sub(1);
-                        record(&mut fs.lang_stats, classifier.as_mut(), &line[1..], true);
+                        record(
+                            &mut fs.lang_stats,
+                            new_classifier.as_mut(),
+                            &line[1..],
+                            true,
+                        );
                     }
                     Some(b'\\') => {} // "\ No newline at end of file"
                     _ => {
@@ -58,7 +77,8 @@ pub fn parse_diff<R: std::io::BufRead>(
         if line.starts_with("--- ") {
             flush(&mut current_file_stats, stats);
 
-            let path_part = line.trim_start_matches("--- ").trim();
+            let path_part = unquote(line.trim_start_matches("--- ").trim());
+            let path_part = path_part.as_str();
             if path_part == "/dev/null" {
                 current_file_stats = None;
                 continue;
@@ -71,7 +91,7 @@ pub fn parse_diff<R: std::io::BufRead>(
             };
 
             let language = Language::from_path(Path::new(clean_path));
-            classifier = get_classifier(language);
+            (old_classifier, new_classifier) = classifiers(language);
             current_file_stats = Some(FileStats {
                 path: clean_path.to_string(),
                 language: language.to_string(),
@@ -81,7 +101,8 @@ pub fn parse_diff<R: std::io::BufRead>(
         }
 
         if line.starts_with("+++ ") {
-            let path_part = line.trim_start_matches("+++ ").trim();
+            let path_part = unquote(line.trim_start_matches("+++ ").trim());
+            let path_part = path_part.as_str();
             if path_part == "/dev/null" {
                 continue;
             }
@@ -95,13 +116,13 @@ pub fn parse_diff<R: std::io::BufRead>(
             if let Some(fs) = &mut current_file_stats {
                 if fs.path != clean_path {
                     let language = Language::from_path(Path::new(clean_path));
-                    classifier = get_classifier(language);
+                    (old_classifier, new_classifier) = classifiers(language);
                     fs.path = clean_path.to_string();
                     fs.language = language.to_string();
                 }
             } else {
                 let language = Language::from_path(Path::new(clean_path));
-                classifier = get_classifier(language);
+                (old_classifier, new_classifier) = classifiers(language);
                 current_file_stats = Some(FileStats {
                     path: clean_path.to_string(),
                     language: language.to_string(),
@@ -113,13 +134,13 @@ pub fn parse_diff<R: std::io::BufRead>(
 
         // Hunk header
         if line.starts_with("@@") {
-            (old_left, new_left) = hunk_counts(&line);
+            (old_left, new_left) = hunk_counts(line);
             // Reset classifier state for new hunk because hunks are disjoint
             // and carrying state (like in_comment) across hunks is dangerous.
             // We re-initialize the classifier for the current language.
             if let Some(fs) = &current_file_stats {
-                let lang = Language::from_path(Path::new(&fs.path));
-                classifier = get_classifier(lang);
+                (old_classifier, new_classifier) =
+                    classifiers(Language::from_path(Path::new(&fs.path)));
             }
             continue;
         }
@@ -129,6 +150,57 @@ pub fn parse_diff<R: std::io::BufRead>(
     flush(&mut current_file_stats, stats);
 
     Ok(())
+}
+
+type BoxedClassifier = Box<dyn Classifier>;
+
+fn classifiers(language: Language) -> (BoxedClassifier, BoxedClassifier) {
+    (get_classifier(language), get_classifier(language))
+}
+
+/// Decodes a path git wrote as a C-style quoted string (`"b/\303\251.py"`) for
+/// non-ASCII or special characters; other paths are returned unchanged.
+fn unquote(path: &str) -> String {
+    let Some(inner) = path.strip_prefix('"').and_then(|p| p.strip_suffix('"')) else {
+        return path.to_string();
+    };
+    let src = inner.as_bytes();
+    let mut out = Vec::with_capacity(src.len());
+    let mut i = 0;
+    while i < src.len() {
+        if src[i] != b'\\' || i + 1 == src.len() {
+            out.push(src[i]);
+            i += 1;
+            continue;
+        }
+        let esc = src[i + 1];
+        i += 2;
+        out.push(match esc {
+            b'n' => b'\n',
+            b't' => b'\t',
+            b'r' => b'\r',
+            b'a' => 7,
+            b'b' => 8,
+            b'f' => 12,
+            b'v' => 11,
+            b'0'..=b'7' => {
+                // Up to three octal digits encode one raw byte of the UTF-8 path.
+                let mut v = u32::from(esc - b'0');
+                for _ in 0..2 {
+                    match src.get(i) {
+                        Some(d @ b'0'..=b'7') => {
+                            v = v * 8 + u32::from(d - b'0');
+                            i += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                v as u8
+            }
+            other => other, // \" and \\
+        });
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Moves the file being parsed into `stats` if any line of it was counted.
@@ -284,6 +356,53 @@ new mode 100755
             ),
             (2, 1)
         );
+    }
+
+    #[test]
+    fn test_removed_and_added_sides_do_not_share_state() {
+        // Editing a docstring's first line: the removed `"""` must not close the added one.
+        let diff_input = "\
+diff --git a/a.py b/a.py
+--- a/a.py
++++ b/a.py
+@@ -3 +3,2 @@
+-    \"\"\"Old summary.
++    \"\"\"New summary.
++    Second line.\"\"\"
+diff --git a/b.c b/b.c
+--- a/b.c
++++ b/b.c
+@@ -1 +1 @@
+-/* old
++int y;
+";
+        let mut stats = Vec::new();
+        parse_diff(Cursor::new(diff_input), &mut stats).unwrap();
+        let py = &stats[0].lang_stats;
+        assert_eq!(
+            (py.docstring_lines_removed, py.docstring_lines_added),
+            (1, 2)
+        );
+        assert_eq!(py.pure_added, 0);
+        let c = &stats[1].lang_stats;
+        assert_eq!((c.comment_lines_removed, c.pure_added), (1, 1));
+    }
+
+    #[test]
+    fn test_quoted_paths_and_non_utf8_content() {
+        let mut diff_input =
+            b"diff --git \"a/\\303\\251 \\303\\274.py\" \"b/\\303\\251 \\303\\274.py\"\n\
+--- \"a/\\303\\251 \\303\\274.py\"\n\
++++ \"b/\\303\\251 \\303\\274.py\"\n\
+@@ -1 +1 @@\n"
+                .to_vec();
+        diff_input.extend_from_slice(b"-x = \"caf\xe9\"\r\n+x = 1\r\n");
+        let mut stats = Vec::new();
+        parse_diff(Cursor::new(diff_input), &mut stats).unwrap();
+        assert_eq!(stats[0].path, "é ü.py");
+        assert_eq!(stats[0].language, "Python");
+        let s = &stats[0].lang_stats;
+        assert_eq!((s.pure_removed, s.pure_added), (1, 1));
     }
 
     #[test]

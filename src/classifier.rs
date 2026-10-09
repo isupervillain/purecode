@@ -157,6 +157,8 @@ pub struct CStyleClassifier {
     open_string: Option<(String, bool)>,
     /// Rust: `'` starts a char literal or a lifetime, never a string.
     char_literals: bool,
+    /// Go: backtick strings are raw (no escapes, no `${}` interpolation).
+    raw_backticks: bool,
     /// Brace depth inside each open `${...}` template-literal interpolation (innermost last).
     interpolations: Vec<usize>,
     /// No code line seen yet: a diff hunk may begin in the middle of a block comment.
@@ -169,6 +171,7 @@ impl CStyleClassifier {
             in_block: false,
             open_string: None,
             char_literals: false,
+            raw_backticks: false,
             interpolations: Vec::new(),
             at_start: true,
         }
@@ -177,6 +180,13 @@ impl CStyleClassifier {
     pub fn rust() -> Self {
         Self {
             char_literals: true,
+            ..Self::new()
+        }
+    }
+
+    pub fn go() -> Self {
+        Self {
+            raw_backticks: true,
             ..Self::new()
         }
     }
@@ -223,7 +233,7 @@ impl Classifier for CStyleClassifier {
                     i += 2;
                     continue;
                 }
-                if closer == "`" && c == '$' && next == Some('{') {
+                if closer == "`" && *escapes && c == '$' && next == Some('{') {
                     self.open_string = None;
                     self.interpolations.push(0);
                     i += 2;
@@ -281,7 +291,7 @@ impl Classifier for CStyleClassifier {
                     i += 2;
                 } else if c == '`' {
                     // Template literal (JS/TS) or raw string (Go).
-                    self.open_string = Some(("`".into(), true));
+                    self.open_string = Some(("`".into(), !self.raw_backticks));
                 } else if self.char_literals
                     && c == 'r'
                     && !prev_is_ident
@@ -325,13 +335,40 @@ fn starts_with(chars: &[char], s: &str) -> bool {
 }
 
 /// Index of the closing `/` if a regex literal starts at `start`; `None` means division.
-/// A `/` starts a regex only after an operator, an opening bracket, or at the start of the line.
+/// A `/` starts a regex only after an operator, an opening bracket, a keyword such as `return`,
+/// or at the start of the line.
 fn regex_literal_end(chars: &[char], start: usize) -> Option<usize> {
     if chars[start] != '/' {
         return None;
     }
-    let prev = chars[..start].iter().rev().find(|c| !c.is_whitespace());
-    if prev.is_some_and(|p| !"(,=:[!&|?{};".contains(*p)) {
+    let before: String = chars[..start].iter().collect();
+    let before = before.trim_end();
+    let after_operator = before
+        .chars()
+        .next_back()
+        .is_none_or(|p| "(,=:[!&|?{};".contains(p));
+    let word = before
+        .rsplit(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+        .next()
+        .unwrap_or("");
+    let after_keyword = matches!(
+        word,
+        "return"
+            | "typeof"
+            | "case"
+            | "do"
+            | "else"
+            | "in"
+            | "of"
+            | "void"
+            | "yield"
+            | "await"
+            | "delete"
+            | "instanceof"
+            | "new"
+            | "throw"
+    );
+    if !after_operator && !after_keyword {
         return None;
     }
     let mut in_class = false;
@@ -451,9 +488,10 @@ impl Classifier for HtmlClassifier {
 
         let kind = self.classify_markup(trimmed);
         if !self.in_comment && kind == LineType::Pure {
+            let markup = without_html_comments(&lower);
             for (open, close) in [("<script", "</script>"), ("<style", "</style>")] {
-                if let Some(p) = lower.rfind(open) {
-                    if !lower[p..].contains(close) {
+                if let Some(p) = markup.rfind(open) {
+                    if !markup[p..].contains(close) {
                         self.embedded = Some((CStyleClassifier::new(), close));
                     }
                 }
@@ -512,6 +550,21 @@ impl HtmlClassifier {
     }
 }
 
+/// The line with every complete `<!-- ... -->` removed.
+fn without_html_comments(line: &str) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("-->") {
+            Some(end) => rest = &rest[start + end + 3..],
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 pub fn get_classifier(lang: Language) -> Box<dyn Classifier> {
     match lang {
         Language::Python => Box::new(PythonClassifier::new()),
@@ -521,13 +574,13 @@ pub fn get_classifier(lang: Language) -> Box<dyn Classifier> {
         | Language::Cpp
         | Language::Csharp
         | Language::Java
-        | Language::Go
         | Language::Php
         | Language::Swift
         | Language::Kotlin
         | Language::Scala
         | Language::Css => Box::new(CStyleClassifier::new()),
         Language::Rust => Box::new(CStyleClassifier::rust()),
+        Language::Go => Box::new(CStyleClassifier::go()),
         Language::Shell | Language::PowerShell | Language::Yaml | Language::Toml => {
             Box::new(ShellClassifier)
         }
@@ -665,6 +718,36 @@ mod tests {
             LineType::Pure
         );
         assert_eq!(c.classify("// text, not script"), LineType::Pure);
+    }
+
+    #[test]
+    fn test_go_raw_string_ending_in_backslash() {
+        let mut c = CStyleClassifier::go();
+        assert_eq!(c.classify(r"p := `C:\temp\`"), LineType::Pure);
+        assert_eq!(c.classify("// real comment"), LineType::Comment);
+        assert_eq!(
+            c.classify("s := `${HOME} // not a comment`"),
+            LineType::Pure
+        );
+        assert_eq!(c.classify("// comment"), LineType::Comment);
+    }
+
+    #[test]
+    fn test_regex_after_keyword() {
+        let mut c = CStyleClassifier::new();
+        assert_eq!(c.classify("return /`/.test(s)"), LineType::Pure);
+        assert_eq!(c.classify("// comment"), LineType::Comment);
+        assert_eq!(c.classify("const n = total / count // c"), LineType::Pure);
+        assert_eq!(c.classify("// comment"), LineType::Comment);
+    }
+
+    #[test]
+    fn test_html_comment_mentioning_script() {
+        let mut c = HtmlClassifier::new();
+        assert_eq!(c.classify("<p><!-- <script> --></p>"), LineType::Pure);
+        assert_eq!(c.classify("// text, not script"), LineType::Pure);
+        assert_eq!(c.classify("<!-- <style> -->"), LineType::Comment);
+        assert_eq!(c.classify("/* text */"), LineType::Pure);
     }
 
     #[test]
