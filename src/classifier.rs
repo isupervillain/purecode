@@ -325,7 +325,7 @@ impl Classifier for CStyleClassifier {
                     self.open_string = Some(("`".into(), !self.raw_backticks));
                 } else if self.char_literals
                     && c == 'r'
-                    && !prev_is_ident
+                    && (!prev_is_ident || is_byte_prefix(&chars[..i]))
                     && is_raw_string_start(&chars[i + 1..])
                 {
                     // Rust raw string r#"..."#.
@@ -352,11 +352,28 @@ impl Classifier for CStyleClassifier {
             i += 1;
         }
 
+        // A string still open at the end of the line continues on the next one: always in Rust,
+        // elsewhere only after a `\` line continuation.
+        if let Some(q) = quote {
+            if self.char_literals || trimmed.ends_with('\\') {
+                self.open_string = Some((q.to_string(), true));
+            }
+        }
+
         if has_code {
             LineType::Pure
         } else {
             LineType::Comment
         }
+    }
+}
+
+/// `chars` ends with a lone `b` (as in `br"..."`), not with a longer identifier.
+fn is_byte_prefix(chars: &[char]) -> bool {
+    match chars {
+        [.., before, 'b'] => !(before.is_alphanumeric() || *before == '_'),
+        ['b'] => true,
+        _ => false,
     }
 }
 
@@ -961,6 +978,23 @@ mod tests {
         let start = std::time::Instant::now();
         assert_eq!(CStyleClassifier::new().classify(&line), LineType::Pure);
         assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_multi_line_strings_carry_over() {
+        let mut rs = CStyleClassifier::rust();
+        assert_eq!(rs.classify(r#"    "usage: tool"#), LineType::Pure);
+        assert_eq!(rs.classify(r#"     glob: src/*.rs""#), LineType::Pure);
+        assert_eq!(rs.classify("fn real() { let x = 1; }"), LineType::Pure);
+        assert_eq!(rs.classify("// comment"), LineType::Comment);
+        assert_eq!(rs.classify(r#"let p = br"C:";"#), LineType::Pure);
+        assert_eq!(rs.classify("// comment"), LineType::Comment);
+        let mut js = CStyleClassifier::new();
+        assert_eq!(js.classify(r#"const s = "a /* "#), LineType::Pure);
+        assert_eq!(js.classify(r#"b";"#), LineType::Pure);
+        assert_eq!(js.classify("// comment"), LineType::Comment);
+        assert_eq!(js.classify(r#"const t = "unterminated"#), LineType::Pure);
+        assert_eq!(js.classify("// still a comment"), LineType::Comment);
     }
 
     #[test]

@@ -12,27 +12,29 @@ pub enum DiffTarget<'a> {
 
 /// Runs `git diff` in the form the parser expects, regardless of the user's git config.
 pub fn get_git_diff(target: DiffTarget) -> io::Result<Box<dyn BufRead>> {
-    let inside = Command::new("git")
+    // Outside a repository `git diff` would fall back to `--no-index` and print its usage;
+    // report git's own reason instead (not a repository, `safe.directory` ownership, ...).
+    let check = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if !inside.success() {
-        return Err(io::Error::other(
-            "not inside a git repository (use --stdin to analyze a diff from elsewhere)",
-        ));
+        .output()?;
+    if !check.status.success() {
+        return Err(io::Error::other(format!(
+            "{} (use --stdin to analyze a diff from elsewhere)",
+            String::from_utf8_lossy(&check.stderr).trim()
+        )));
     }
 
     let mut cmd = Command::new("git");
+    // `diff.relative` would limit and re-root paths; `--no-relative` needs git 2.28+.
+    cmd.args(["-c", "diff.relative=false"]);
     cmd.args([
         "diff",
         "--unified=0",
         "--no-color",
-        // An external diff tool, textconv filter, missing/custom path prefixes or
-        // `diff.relative` would change or empty the output and silently pass a CI gate.
+        // An external diff tool, textconv filter or missing/custom path prefixes would change
+        // or empty the output and silently pass a CI gate.
         "--no-ext-diff",
         "--no-textconv",
-        "--no-relative",
         "--src-prefix=a/",
         "--dst-prefix=b/",
         // Full blob ids let the parser classify changed lines within their whole file.

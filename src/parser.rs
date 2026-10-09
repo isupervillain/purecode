@@ -90,7 +90,8 @@ pub fn parse_diff<R: BufRead>(
     let mut file: Option<FileState> = None;
     // Metadata of the next file, from its `diff --git` / `index` lines.
     let mut blob_ids: (Option<String>, Option<String>) = (None, None);
-    let mut submodule = false;
+    // Submodule pointers (mode 160000) and symlinks (120000) are not source lines.
+    let mut skip_file = false;
     // Lines still owed by the current hunk. While non-zero, `---`/`+++` are content, not headers.
     let (mut old_left, mut new_left) = (0usize, 0usize);
     let (mut saw_diff, mut saw_text) = (false, false);
@@ -146,18 +147,30 @@ pub fn parse_diff<R: BufRead>(
             flush(&mut file, stats);
             saw_diff = true;
             blob_ids = (None, None);
-            submodule = false;
+            skip_file = false;
             (old_left, new_left) = (0, 0);
             continue;
         }
 
-        // `index <old>..<new> [mode]`: blob ids of both sides; mode 160000 is a submodule.
+        // `index <old>..<new> [mode]`: blob ids of both sides.
         if let Some(rest) = line.strip_prefix("index ") {
             let mut parts = rest.split_whitespace();
             if let Some((old, new)) = parts.next().and_then(|ids| ids.split_once("..")) {
                 blob_ids = (blob_id(old), blob_id(new));
             }
-            submodule = parts.next() == Some("160000");
+            skip_file |= parts.next().is_some_and(is_non_source_mode);
+            continue;
+        }
+        if let Some(mode) = [
+            "new file mode ",
+            "deleted file mode ",
+            "old mode ",
+            "new mode ",
+        ]
+        .iter()
+        .find_map(|prefix| line.strip_prefix(prefix))
+        {
+            skip_file |= is_non_source_mode(mode.trim());
             continue;
         }
 
@@ -171,7 +184,7 @@ pub fn parse_diff<R: BufRead>(
             flush(&mut file, stats);
             saw_diff = true;
             let path = unquote(path.trim());
-            if path == "/dev/null" || submodule {
+            if path == "/dev/null" || skip_file {
                 continue;
             }
             let path = path.strip_prefix("a/").unwrap_or(&path);
@@ -181,7 +194,7 @@ pub fn parse_diff<R: BufRead>(
 
         if let Some(path) = line.strip_prefix("+++ ") {
             let path = unquote(path.trim());
-            if path == "/dev/null" || submodule {
+            if path == "/dev/null" || skip_file {
                 continue;
             }
             let path = path.strip_prefix("b/").unwrap_or(&path);
@@ -238,6 +251,10 @@ fn new_file(path: &str, blob_ids: &(Option<String>, Option<String>)) -> FileStat
         old,
         new,
     }
+}
+
+fn is_non_source_mode(mode: &str) -> bool {
+    mode == "160000" || mode == "120000"
 }
 
 /// A usable blob id: hex only (stdin is untrusted), and not the all-zero id of a missing side.
@@ -613,9 +630,28 @@ index 1111111..2222222 160000
 -Subproject commit 1111111
 +Subproject commit 2222222
 ";
-        let mut stats = Vec::new();
-        parse_diff(Cursor::new(submodule), &mut stats, &mut NoBlobs).unwrap();
-        assert!(stats.is_empty());
+        let added_submodule = "\
+diff --git a/lib b/lib
+new file mode 160000
+index 0000000..2222222
+--- /dev/null
++++ b/lib
+@@ -0,0 +1 @@
++Subproject commit 2222222
+diff --git a/link.py b/link.py
+new file mode 120000
+index 0000000..3333333
+--- /dev/null
++++ b/link.py
+@@ -0,0 +1 @@
++target.py
+\\ No newline at end of file
+";
+        for input in [submodule, added_submodule] {
+            let mut stats = Vec::new();
+            parse_diff(Cursor::new(input), &mut stats, &mut NoBlobs).unwrap();
+            assert!(stats.is_empty(), "{input}");
+        }
 
         let combined =
             "diff --cc a.py\nindex 1,2..3\n--- a/a.py\n+++ b/a.py\n@@@ -1,1 -1,1 +1,2 @@@\n";

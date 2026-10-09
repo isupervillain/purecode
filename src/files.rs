@@ -1,6 +1,7 @@
 use crate::classifier::{get_classifier, text_lines, LineType};
 use crate::config::PathFilter;
 use crate::language::Language;
+use crate::report::printable;
 use crate::stats::{FileStats, LangStats};
 use ignore::WalkBuilder;
 use std::io::{self, BufRead};
@@ -25,7 +26,10 @@ pub fn analyze_files(
                 continue;
             }
             if !path.is_file() {
-                eprintln!("Warning: not a file, skipped: {}", path.display());
+                eprintln!(
+                    "Warning: not a file, skipped: {}",
+                    printable(&path.to_string_lossy())
+                );
                 continue;
             }
             if let Some(fs) = analyze_or_warn(path, path) {
@@ -57,7 +61,7 @@ pub fn analyze_files(
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(e) => {
-                    eprintln!("Warning: skipped: {e}");
+                    eprintln!("Warning: skipped: {}", printable(&e.to_string()));
                     continue;
                 }
             };
@@ -88,7 +92,10 @@ fn analyze_or_warn(path: &Path, shown: &Path) -> Option<FileStats> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(e) => {
-            eprintln!("Warning: cannot read {}: {e}", path.display());
+            eprintln!(
+                "Warning: cannot read {}: {e}",
+                printable(&path.to_string_lossy())
+            );
             return None;
         }
     };

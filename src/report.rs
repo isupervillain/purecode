@@ -117,7 +117,7 @@ fn print_human_report(
         for file in files {
             println!(
                 "  {:<30} [{}] | Pure: {:>3}",
-                file.path,
+                printable(&file.path),
                 file.language.yellow(),
                 file.lang_stats.net_pure()
             );
@@ -161,13 +161,28 @@ fn print_plain_report(
         for file in files {
             println!(
                 "  {:<30} [{}] | Pure: {:>3}",
-                file.path,
+                printable(&file.path),
                 file.language,
                 file.lang_stats.net_pure()
             );
         }
     }
     println!();
+}
+
+/// `text` with control characters escaped, so file names from an untrusted diff cannot inject
+/// terminal escape sequences into logs or terminals.
+pub fn printable(text: &str) -> String {
+    text.chars()
+        .flat_map(|c| {
+            let escaped: Vec<char> = if c.is_control() {
+                c.escape_default().collect()
+            } else {
+                vec![c]
+            };
+            escaped
+        })
+        .collect()
 }
 
 fn complexity_bucket(score: f64) -> &'static str {
@@ -198,4 +213,18 @@ fn aggregate_by_language(stats: &[FileStats]) -> BTreeMap<String, LangStats> {
         entry.code_words_removed += file.lang_stats.code_words_removed;
     }
     lang_map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn printable_escapes_control_characters() {
+        assert_eq!(
+            printable("evil\u{1b}[2J\u{7}.py"),
+            "evil\\u{1b}[2J\\u{7}.py"
+        );
+        assert_eq!(printable("src/é ü.py"), "src/é ü.py");
+    }
 }

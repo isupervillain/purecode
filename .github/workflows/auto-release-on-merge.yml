@@ -24,7 +24,7 @@ jobs:
       - name: Get Version from Cargo.toml
         id: get_version
         run: |
-          VERSION=$(grep -m1 'version =' Cargo.toml | cut -d '"' -f 2)
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f 2)
           echo "Found version: $VERSION"
           echo "version_tag=v$VERSION" >> "$GITHUB_OUTPUT"
 

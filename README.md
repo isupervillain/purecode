@@ -62,7 +62,7 @@ purecode diff --staged
 git diff --unified=0 --full-index origin/main | purecode diff --stdin
 ```
 
-PureCode runs `git diff` itself with fixed options, so personal git settings such as an external diff tool, textconv filters, `diff.noprefix` or `diff.relative` cannot change the result. A diff read from stdin inside the same repository is also classified with whole-file context; otherwise each hunk is classified on its own (context lines are used when present). Combined merge diffs (`diff --cc`) are rejected; diff a merge against one parent instead. Submodule pointer changes are not counted.
+PureCode runs `git diff` itself with fixed options, so personal git settings such as an external diff tool, textconv filters, `diff.noprefix` or `diff.relative` cannot change the result. A diff read from stdin inside the same repository is also classified with whole-file context; otherwise each hunk is classified on its own (context lines are used when present). Combined merge diffs (`diff --cc`) are rejected; diff a merge against one parent instead. Submodule and symlink changes are not counted. `--stdin` cannot be combined with `--base`, `--head` or `--staged`.
 
 ### Files Mode (Snapshot)
 
@@ -99,7 +99,7 @@ Python, JavaScript (`.js .jsx .mjs .cjs`), TypeScript (`.ts .tsx .mts .cts`), HT
 
 ## Configuration
 
-You can configure defaults via a `.purecode.toml` file in your project root. PureCode looks for it in the working directory and its parents, up to the repository root, so running from a subdirectory uses the same settings.
+You can configure defaults via a `.purecode.toml` file in your project root. PureCode looks for it in the working directory and its parents, up to the repository root, so running from a subdirectory uses the same settings. Outside a git repository only the working directory is searched.
 
 ```toml
 [purecode]
@@ -134,6 +134,7 @@ CLI flags override configuration values. Boolean settings (`fail_on_decrease`, `
 Classification is heuristic, line-based, and needs no compiler. Known edge cases:
 
 - When whole-file context is unavailable (a diff from another repository piped to `--stdin`), a hunk that starts inside a block comment is recognised only by its leading `*` lines (`* text`, `*/`), and a Python string argument that starts a hunk is treated as a docstring.
+- Because each file is classified as a whole, a construct the line-based rules misread (an unusual literal that hides a `/*`, say) can affect the lines after it in that file, not only its own line.
 - Heredocs and code embedded in YAML (`run: |`) are classified by the host language's rules.
 - In JavaScript, a regex literal is recognised after an operator, an opening bracket or a keyword such as `return`; elsewhere `/` is division.
 
@@ -146,7 +147,7 @@ Add to `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/isupervillain/purecode
-    rev: v0.2.2
+    rev: v0.3.0
     hooks:
       - id: purecode
         args: ["--format", "human"]

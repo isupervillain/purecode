@@ -61,7 +61,7 @@ impl Default for Config {
     }
 }
 
-/// Finds `.purecode.toml` in the working directory or a parent, up to the repository root, and
+/// Finds `.purecode.toml` in the working directory or a parent up to the repository root, and
 /// returns the config with the directory it applies to (the project root). Without a config
 /// file, the defaults apply to the working directory.
 ///
@@ -69,7 +69,13 @@ impl Default for Config {
 /// would disable the thresholds a CI gate relies on.
 pub fn load_config() -> Result<(Config, PathBuf), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("Cannot read working directory: {e}"))?;
-    for dir in cwd.ancestors() {
+    // Outside a repository only the working directory is searched, so a stray
+    // ~/.purecode.toml or /tmp/.purecode.toml never applies.
+    let repo_root = cwd.ancestors().find(|d| d.join(".git").exists());
+    let search = cwd
+        .ancestors()
+        .take_while(|d| repo_root.is_some_and(|root| d.starts_with(root)));
+    for dir in std::iter::once(cwd.as_path()).chain(search.skip(1)) {
         let path = dir.join(".purecode.toml");
         if path.is_file() {
             let content = fs::read_to_string(&path)
@@ -77,9 +83,6 @@ pub fn load_config() -> Result<(Config, PathBuf), String> {
             let config =
                 parse_config(&content).map_err(|e| format!("Invalid {}: {e}", path.display()))?;
             return Ok((config, dir.to_path_buf()));
-        }
-        if dir.join(".git").exists() {
-            break;
         }
     }
     Ok((Config::default(), cwd))

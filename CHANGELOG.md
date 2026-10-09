@@ -1,0 +1,26 @@
+# Changelog
+
+## 0.3.0
+
+### Changed
+
+- Diff mode classifies changed lines in the context of their whole file (read from git), so lines added inside an existing docstring or block comment count as noise.
+- Default and configured `include`/`exclude` now apply in diff mode too; lock files, `dist/`, `target/` and `node_modules/` no longer count as code. Thresholds based on earlier numbers may need adjusting.
+- An invalid `.purecode.toml` (unknown key, bad value, invalid glob, unparsable TOML) is an error (exit 1) instead of silently falling back to defaults. Keys may be written at the top level or under `[purecode]`.
+- `.purecode.toml` is found from subdirectories (searched up to the repository root).
+- Files mode respects `.gitignore`, skips binary and lock files, and decodes non-UTF-8 files instead of skipping them.
+- `--stdin` cannot be combined with `--base`/`--head`; `--max-noise-ratio` must be between 0.0 and 1.0; in globs `*` no longer matches across `/`.
+- With `--format json --ci`, `PURECODE_FAIL` is no longer appended to stdout, so the output stays valid JSON.
+
+### Added
+
+- `purecode diff --staged`, used by the pre-commit hook.
+- Languages: `.cjs`, `.mts`, `.cts`, `.pyi`, case-insensitive extensions, `makefile`/`GNUmakefile`, PowerShell block comments.
+
+### Fixed
+
+- Lines that look like diff headers (`-- x`, `++i;`) are counted; a text file followed by a binary file is no longer dropped; renames, quoted non-ASCII paths, CRLF and non-UTF-8 diffs are handled.
+- Comment markers inside strings, template literals, regex literals and raw strings no longer turn code into comments; Python data strings are no longer counted as docstrings; `<script>`/`<style>` in HTML and Vue are classified as code.
+- `git diff` runs with fixed options, so an external diff tool, textconv, `diff.noprefix` or `diff.relative` cannot change the result; refs starting with `-` are rejected.
+- Control characters in file names are escaped in reports.
+- `--version` reports the real version; the pre-commit hook analyzes staged changes; the release workflow builds the Intel macOS asset again.
