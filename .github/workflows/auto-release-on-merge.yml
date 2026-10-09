@@ -4,22 +4,27 @@ on:
   pull_request:
     types: [closed]
 
+# Jobs get write access only where they publish; the build job runs repository code with a
+# read-only token.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   prepare_release:
     if: github.event.pull_request.merged == true
     name: Prepare Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       release_tag: ${{ steps.get_version.outputs.version_tag }}
       release_created: ${{ steps.check_create_release.outputs.release_created }}
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
+          persist-credentials: false
 
       - name: Get Version from Cargo.toml
         id: get_version
@@ -28,7 +33,7 @@ jobs:
           echo "Found version: $VERSION"
           echo "version_tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Check and Create Release
+      - name: Check and Create Draft Release
         id: check_create_release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -39,15 +44,16 @@ jobs:
             echo "Release $TAG already exists. Skipping creation."
             echo "release_created=false" >> "$GITHUB_OUTPUT"
           else
-            echo "Creating release $TAG for commit $SHA"
-            gh release create "$TAG" --target "$SHA" --generate-notes
+            # A draft is not "latest", so installers never see a release without assets.
+            echo "Creating draft release $TAG for commit $SHA"
+            gh release create "$TAG" --target "$SHA" --generate-notes --draft
             echo "release_created=true" >> "$GITHUB_OUTPUT"
           fi
 
-  build_and_upload:
+  build:
     needs: prepare_release
-    if: needs.prepare_release.outputs.release_tag != ''
-    name: Build and Upload Assets
+    if: needs.prepare_release.outputs.release_created == 'true'
+    name: Build Assets
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -78,12 +84,13 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
+          persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
@@ -95,7 +102,7 @@ jobs:
           sudo apt-get install -y musl-tools
 
       - name: Build Release
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
@@ -111,9 +118,35 @@ jobs:
           7z a ../../../${{ matrix.asset_name }} ${{ matrix.artifact_name }}
           cd -
 
-      - name: Upload Release Asset
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
+          if-no-files-found: error
+
+  publish:
+    needs: [prepare_release, build]
+    name: Publish Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Write Checksums
+        working-directory: dist
+        run: sha256sum purecode-* > SHA256SUMS && cat SHA256SUMS
+
+      - name: Upload Assets and Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.prepare_release.outputs.release_tag }}
+        working-directory: dist
         run: |
-          gh release upload "$TAG" "${{ matrix.asset_name }}"
+          gh release upload "$TAG" purecode-* SHA256SUMS --repo "$GITHUB_REPOSITORY"
+          gh release edit "$TAG" --draft=false --latest --repo "$GITHUB_REPOSITORY"

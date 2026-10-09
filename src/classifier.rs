@@ -382,6 +382,8 @@ fn starts_with(chars: &[char], s: &str) -> bool {
     s.chars().all(|c| it.next() == Some(&c))
 }
 
+const MAX_REGEX_LITERAL: usize = 256;
+
 /// Index of the closing `/` if a regex literal starts at `start`; `None` means division.
 /// A `/` starts a regex only after an operator, an opening bracket, a keyword such as `return`,
 /// or at the start of the line.
@@ -424,7 +426,10 @@ fn regex_literal_end(chars: &[char], start: usize) -> Option<usize> {
     }
     let mut in_class = false;
     let mut j = start + 1;
-    while j < chars.len() {
+    // Bounded lookahead keeps lines with many unmatched `/` linear (a crafted line must not
+    // stall CI); real regex literals are far shorter.
+    let limit = chars.len().min(start + 1 + MAX_REGEX_LITERAL);
+    while j < limit {
         match chars[j] {
             '\\' => j += 1,
             '[' => in_class = true,
@@ -974,10 +979,14 @@ mod tests {
 
     #[test]
     fn test_long_lines_with_many_slashes_are_linear() {
-        let line = format!("x = {}1;", "a/b+".repeat(50_000));
-        let start = std::time::Instant::now();
-        assert_eq!(CStyleClassifier::new().classify(&line), LineType::Pure);
-        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        for line in [
+            format!("x = {}1;", "a/b+".repeat(50_000)),
+            "/[".repeat(100_000), // every `/` looks like a regex start, none closes
+        ] {
+            let start = std::time::Instant::now();
+            assert_eq!(CStyleClassifier::new().classify(&line), LineType::Pure);
+            assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        }
     }
 
     #[test]

@@ -23,8 +23,8 @@ impl BlobSource for NoBlobs {
 struct Side {
     language: Language,
     blob_id: Option<String>,
-    /// Lines of the whole file with their classification; loaded on first use.
-    lines: Option<Option<Vec<(String, LineType)>>>,
+    /// The whole file with its classification; loaded on first use.
+    file: Option<Option<WholeFile>>,
     /// Classifier for the current hunk alone, used when the whole file is unavailable.
     hunk: Box<dyn Classifier>,
     /// 1-based line number of the next line of this side in the current hunk.
@@ -36,7 +36,7 @@ impl Side {
         Self {
             language,
             blob_id: None,
-            lines: None,
+            file: None,
             hunk: get_classifier(language),
             next_line: 0,
         }
@@ -55,22 +55,39 @@ impl Side {
         self.next_line += 1;
         let language = self.language;
         let id = self.blob_id.as_deref();
-        let lines = self.lines.get_or_insert_with(|| {
-            let bytes = blobs.blob(id?)?;
-            let mut classifier = get_classifier(language);
-            Some(
-                text_lines(&bytes)
-                    .map(|l| {
-                        let t = classifier.classify(&l);
-                        (l, t)
-                    })
-                    .collect(),
-            )
-        });
-        match lines.as_ref().and_then(|ls| ls.get(n.checked_sub(1)?)) {
-            Some((text, t)) if text == content => *t,
+        let file = self
+            .file
+            .get_or_insert_with(|| Some(WholeFile::new(&blobs.blob(id?)?, language)));
+        match file.as_ref().and_then(|f| f.line(n)) {
+            Some((text, t)) if text == content => t,
             _ => local,
         }
+    }
+}
+
+/// A file's text and per-line classification, stored compactly (one buffer plus offsets).
+struct WholeFile {
+    text: String,
+    lines: Vec<(usize, usize, LineType)>,
+}
+
+impl WholeFile {
+    fn new(bytes: &[u8], language: Language) -> Self {
+        let mut classifier = get_classifier(language);
+        let mut text = String::with_capacity(bytes.len());
+        let mut lines = Vec::new();
+        for line in text_lines(bytes) {
+            let t = classifier.classify(&line);
+            lines.push((text.len(), text.len() + line.len(), t));
+            text.push_str(&line);
+        }
+        Self { text, lines }
+    }
+
+    /// Text and type of 1-based line `n`.
+    fn line(&self, n: usize) -> Option<(&str, LineType)> {
+        let &(start, end, t) = self.lines.get(n.checked_sub(1)?)?;
+        Some((&self.text[start..end], t))
     }
 }
 
@@ -177,6 +194,7 @@ pub fn parse_diff<R: BufRead>(
         // "Binary files a/foo and b/foo differ": nothing to count for this file.
         if line.starts_with("Binary files") && line.contains("differ") {
             flush(&mut file, stats);
+            warn_if_source(line);
             continue;
         }
 
@@ -250,6 +268,23 @@ fn new_file(path: &str, blob_ids: &(Option<String>, Option<String>)) -> FileStat
         },
         old,
         new,
+    }
+}
+
+/// A `.gitattributes` entry such as `*.py -diff` makes git report source files as binary,
+/// which would silently drop them from the count; say so.
+fn warn_if_source(binary_line: &str) {
+    let paths = binary_line
+        .trim_start_matches("Binary files ")
+        .trim_end_matches(" differ");
+    let new = paths.rsplit(" and ").next().unwrap_or("");
+    let path = unquote(new);
+    let path = path.strip_prefix("b/").unwrap_or(&path);
+    if Language::from_path(Path::new(path)) != Language::Other {
+        eprintln!(
+            "Warning: git reports {} as binary (check .gitattributes); it was not counted.",
+            crate::report::printable(path)
+        );
     }
 }
 

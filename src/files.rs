@@ -7,6 +7,10 @@ use ignore::WalkBuilder;
 use std::io::{self, BufRead};
 use std::path::Path;
 
+/// Larger files (typically generated or data files) are skipped with a warning rather than read
+/// into memory.
+pub const MAX_FILE_BYTES: u64 = 32 << 20;
+
 /// Analyzes every selected text file under `paths`, or each path listed on `reader`.
 /// `filter` patterns are relative to `project_root` (or to a scanned path outside it).
 pub fn analyze_files(
@@ -25,7 +29,8 @@ pub fn analyze_files(
             if line.trim().is_empty() {
                 continue;
             }
-            if !path.is_file() {
+            // Regular files only, as in a directory walk: symlinks are not followed.
+            if !std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file()) {
                 eprintln!(
                     "Warning: not a file, skipped: {}",
                     printable(&path.to_string_lossy())
@@ -52,9 +57,10 @@ pub fn analyze_files(
         };
         // Respects .gitignore/.ignore (so build output is skipped without being walked);
         // hidden files like .github/ are still analyzed.
+        // .gitignore applies inside git repositories only, so a stray .gitignore above an
+        // unrelated directory cannot hide its files; .ignore files apply everywhere.
         let walker = WalkBuilder::new(&root)
             .hidden(false)
-            .require_git(false)
             .filter_entry(|e| e.file_name() != ".git")
             .build();
         for entry in walker {
@@ -89,6 +95,17 @@ pub fn analyze_files(
 /// Stats for a text file, reported under `shown`; binary files are skipped, unreadable ones
 /// are skipped with a warning.
 fn analyze_or_warn(path: &Path, shown: &Path) -> Option<FileStats> {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.len() > MAX_FILE_BYTES => {
+            eprintln!(
+                "Warning: skipped {} (larger than {} MiB)",
+                printable(&path.to_string_lossy()),
+                MAX_FILE_BYTES >> 20
+            );
+            return None;
+        }
+        _ => {}
+    }
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -192,6 +209,20 @@ mod tests {
             ),
             (1, 1)
         );
+    }
+
+    #[test]
+    fn gitignore_outside_a_repository_does_not_hide_files() {
+        let parent = std::env::temp_dir().join(format!("purecode-nogit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&parent);
+        fs::create_dir_all(parent.join("sub")).unwrap();
+        fs::write(parent.join(".gitignore"), "*.py\n").unwrap();
+        fs::write(parent.join("sub/a.py"), "x = 1\n").unwrap();
+        let filter = PathFilter::new(&["**/*".into()], &[]).unwrap();
+        let root = parent.join("sub").to_string_lossy().into_owned();
+        let stats = analyze_files(&[root], &filter, &PathBuf::from("."), None).unwrap();
+        fs::remove_dir_all(&parent).unwrap();
+        assert_eq!(stats.len(), 1);
     }
 
     #[test]

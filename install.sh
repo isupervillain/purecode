@@ -55,7 +55,7 @@ esac
 echo "Detecting latest version..."
 LATEST_URL="https://github.com/$REPO/releases/latest"
 # -I headers only, -o /dev/null discard body, -w redirect_url print final url
-RELEASE_URL=$(curl -Ls -o /dev/null -w "%{url_effective}" "$LATEST_URL")
+RELEASE_URL=$(curl --proto '=https' --tlsv1.2 -Ls -o /dev/null -w "%{url_effective}" "$LATEST_URL")
 # Extract tag from URL (e.g. .../releases/tag/v0.3.0)
 VERSION_TAG=$(basename "$RELEASE_URL")
 
@@ -74,7 +74,21 @@ echo "Downloading $DOWNLOAD_URL ..."
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-curl -LsSf "$DOWNLOAD_URL" -o "$TMP_DIR/$ASSET_NAME"
+curl --proto '=https' --tlsv1.2 -LsSf "$DOWNLOAD_URL" -o "$TMP_DIR/$ASSET_NAME"
+curl --proto '=https' --tlsv1.2 -LsSf "${GITHUB_URL}/${VERSION_TAG}/SHA256SUMS" -o "$TMP_DIR/SHA256SUMS"
+
+# --- Verify ---
+EXPECTED=$(grep " ${ASSET_NAME}\$" "$TMP_DIR/SHA256SUMS" | cut -d ' ' -f 1)
+if command -v sha256sum > /dev/null 2>&1; then
+    ACTUAL=$(sha256sum "$TMP_DIR/$ASSET_NAME" | cut -d ' ' -f 1)
+else
+    ACTUAL=$(shasum -a 256 "$TMP_DIR/$ASSET_NAME" | cut -d ' ' -f 1)
+fi
+if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
+    echo "Error: checksum verification failed for $ASSET_NAME."
+    exit 1
+fi
+echo "Checksum verified."
 
 echo "Installing to $INSTALL_DIR ..."
 mkdir -p "$INSTALL_DIR"

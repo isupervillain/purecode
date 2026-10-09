@@ -64,7 +64,7 @@ purecode diff --staged
 git diff --unified=0 --full-index origin/main | purecode diff --stdin
 ```
 
-PureCode runs `git diff` itself with fixed options, so personal git settings such as an external diff tool, textconv filters, `diff.noprefix` or `diff.relative` cannot change the result. A diff read from stdin inside the same repository is also classified with whole-file context; otherwise each hunk is classified on its own (context lines are used when present). Combined merge diffs (`diff --cc`) are rejected; diff a merge against one parent instead. Submodule and symlink changes are not counted. `--stdin` cannot be combined with `--base`, `--head` or `--staged`.
+PureCode runs `git diff` itself with fixed options, so personal git settings such as an external diff tool, textconv filters, `diff.noprefix` or `diff.relative` cannot change the result. A diff read from stdin inside the same repository is also classified with whole-file context; otherwise each hunk is classified on its own (context lines are used when present). If a `.gitattributes` entry (such as `*.py -diff`) makes git treat a source file as binary, it cannot be counted and a warning names it. Combined merge diffs (`diff --cc`) are rejected; diff a merge against one parent instead. Submodule and symlink changes are not counted. `--stdin` cannot be combined with `--base`, `--head` or `--staged`.
 
 ### Files Mode (Snapshot)
 
@@ -80,7 +80,7 @@ purecode files src/ lib/
 # Skip more files via .purecode.toml (see Configuration)
 ```
 
-Files ignored by git (`.gitignore` at any level, `.git/info/exclude`, the global gitignore) or by `.ignore` are skipped, and ignored directories such as build output are never walked. Binary files, `.git/`, `node_modules`, `target`, `dist` and lock files (`*.lock`, `package-lock.json`, `pnpm-lock.yaml`) are skipped too; unreadable files are skipped with a warning. Hidden files such as `.github/` workflows are analyzed. Files in an unrecognized language are counted under `Other`, with every non-blank line as pure.
+Files ignored by git (`.gitignore` at any level, `.git/info/exclude`, the global gitignore) or by `.ignore` are skipped, and ignored directories such as build output are never walked. Binary files, symlinks, `.git/`, `node_modules`, `target`, `dist` and lock files (`*.lock`, `package-lock.json`, `pnpm-lock.yaml`) are skipped too; unreadable files and files over 32 MiB are skipped with a warning. A file that is committed but matches `.gitignore` is skipped as well. Outside a git repository `.gitignore` files are not used (`.ignore` files are). Hidden files such as `.github/` workflows are analyzed. Files in an unrecognized language are counted under `Other`, with every non-blank line as pure.
 
 When stdin is used (`purecode files --stdin`), one file path per line is read and include/exclude are not applied.
 
@@ -98,6 +98,7 @@ Python, JavaScript (`.js .jsx .mjs .cjs`), TypeScript (`.ts .tsx .mts .cts`), HT
 - `--warn-only`: Print validation failures but exit with 0 (useful for non-blocking CI).
 - `--ci`: Enable CI mode (no colors, summary lines; see [CI Mode](#ci-mode)).
 - `--staged` (diff mode): Analyze changes staged for commit.
+- `--no-config`: Ignore `.purecode.toml` and use only command-line settings.
 
 ## Configuration
 
@@ -130,6 +131,16 @@ CLI flags override configuration values. Boolean settings (`fail_on_decrease`, `
 | 0 | Success (or threshold failure with `--warn-only`) |
 | 1 | Runtime error (e.g. `git diff` failed, bad input) |
 | 2 | A threshold check failed, or invalid command-line usage |
+
+## Security
+
+PureCode reads untrusted input in CI: the analyzed change controls file names and contents, `.purecode.toml`, `.gitignore` and `.gitattributes`.
+
+- **Gate integrity**: `.purecode.toml` is read from the checked-out change, so a pull request can loosen its own thresholds (`warn_only`, `exclude`). For an enforcing gate, pass thresholds on the command line with `--no-config`.
+- **Git**: PureCode runs `git diff` with options that disable external diff tools, textconv filters and fsmonitor hooks, and rejects refs that start with `-`.
+- **Output**: control and bidi characters in file names and error messages are escaped; `.purecode.toml` must be a regular file (not a symlink), and parse errors never quote its contents.
+- **Resources**: changed lines in files over 4 MiB are classified per hunk instead of loading the whole file; Files Mode skips files over 32 MiB.
+- **Installers** verify the downloaded archive against the release's `SHA256SUMS`.
 
 ## Limitations
 
@@ -171,10 +182,12 @@ steps:
     run: curl -LsSf https://raw.githubusercontent.com/isupervillain/purecode/main/install.sh | sh
 
   - name: Run Analysis
-    run: |
-      # Check against the PR base
-      purecode --base origin/${{ github.base_ref }} --head HEAD --format human --max-noise-ratio 0.6
+    env:
+      BASE_REF: ${{ github.base_ref }} # via env: branch names must not be spliced into the script
+    run: purecode --base "origin/$BASE_REF" --head HEAD --no-config --max-noise-ratio 0.6
 ```
+
+`--no-config` keeps a pull request from relaxing the gate through its own `.purecode.toml` (see [Security](#security)).
 
 ## Output Formats
 

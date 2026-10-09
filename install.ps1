@@ -1,5 +1,7 @@
 # PowerShell Installer for purecode
 $ErrorActionPreference = "Stop"
+# Windows PowerShell 5.1 may default to older TLS versions.
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 $Repo = "isupervillain/purecode"
 $GitHubUrl = "https://github.com/$Repo/releases/download"
@@ -57,8 +59,21 @@ if (!(Test-Path $InstallDir)) {
 }
 
 $ZipPath = "$env:TEMP\$AssetName"
+$SumsPath = "$env:TEMP\purecode-SHA256SUMS"
 Write-Host "Downloading $DownloadUrl ..."
 Invoke-WebRequest -Uri $DownloadUrl -OutFile $ZipPath
+Invoke-WebRequest -Uri "$GitHubUrl/$VersionTag/SHA256SUMS" -OutFile $SumsPath
+
+# --- Verify ---
+$Expected = (Get-Content $SumsPath | Where-Object { $_ -match "\s$([regex]::Escape($AssetName))$" } | ForEach-Object { ($_ -split '\s+')[0] }) | Select-Object -First 1
+$Actual = (Get-FileHash -Path $ZipPath -Algorithm SHA256).Hash
+Remove-Item -Path $SumsPath -Force
+if (-not $Expected -or $Expected.ToLower() -ne $Actual.ToLower()) {
+    Remove-Item -Path $ZipPath -Force
+    Write-Error "Checksum verification failed for $AssetName."
+    exit 1
+}
+Write-Host "Checksum verified."
 
 Write-Host "Extracting to $InstallDir ..."
 Expand-Archive -Path $ZipPath -DestinationPath $InstallDir -Force

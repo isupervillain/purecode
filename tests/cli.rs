@@ -320,3 +320,91 @@ fn symlink_changes_are_not_counted() {
     let s = summary(&repo.purecode(&["diff", "--base", "base", "--format", "json"]));
     assert_eq!(s["total_added"], 0);
 }
+
+#[test]
+fn oversized_blob_is_skipped_and_later_files_keep_context() {
+    let big = "x = 1\n".repeat(1_000_000); // ~6 MB, above the blob limit
+    let doc_before = b"def f():\n    \"\"\"Summary.\n\n    \"\"\"\n";
+    let doc_after = b"def f():\n    \"\"\"Summary.\n\n    More.\n    \"\"\"\n";
+    let mut big_after = big.clone();
+    big_after.push_str("y = 2\n");
+    let repo = repo_with_change(
+        &[("big.py", big.as_bytes()), ("z.py", doc_before)],
+        &[("big.py", big_after.as_bytes()), ("z.py", doc_after)],
+    );
+    let out = repo.purecode(&["diff", "--base", "base", "--per-file", "--format", "json"]);
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let file = |name: &str| {
+        report["file_stats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["path"] == name)
+            .unwrap()["lang_stats"]
+            .clone()
+    };
+    assert_eq!(file("big.py")["pure_added"], 1);
+    // z.py comes after big.py in the diff: whole-file context still works.
+    assert_eq!(file("z.py")["docstring_lines_added"], 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_config_is_refused_without_leaking_its_target() {
+    let repo = repo_with_change(&[("a.py", b"x = 1\n")], &[("a.py", b"x = 2\n")]);
+    let secret = repo.dir.with_extension("secret");
+    std::fs::write(&secret, "GITHUB_TOKEN=ghs_SUPERSECRET\n").unwrap();
+    std::os::unix::fs::symlink(&secret, repo.dir.join(".purecode.toml")).unwrap();
+    let out = repo.purecode(&["diff", "--base", "base"]);
+    let _ = std::fs::remove_file(&secret);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!all.contains("ghs_SUPERSECRET"), "{all}");
+    assert!(all.contains("must be a regular file"), "{all}");
+}
+
+#[test]
+fn untrusted_values_in_errors_are_escaped() {
+    let repo = repo_with_change(&[("a.py", b"x = 1\n")], &[("a.py", b"x = 2\n")]);
+    repo.write(
+        ".purecode.toml",
+        b"format = \"x\\u001b[31m\\n::error::FAKE\"\n",
+    );
+    let out = repo.purecode(&["diff", "--base", "base"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains('\x1b'), "{stderr}");
+    assert!(!stderr.lines().any(|l| l.starts_with("::")), "{stderr}");
+}
+
+#[test]
+fn no_config_ignores_a_config_that_relaxes_the_gate() {
+    let repo = repo_with_change(&[("a.py", b"x = 1\n")], &[("a.py", b"x = 1\n# note\n")]);
+    repo.write(
+        ".purecode.toml",
+        b"warn_only = true\nexclude = [\"**/*\"]\n",
+    );
+    let gate = ["diff", "--base", "base", "--min-pure-lines", "1"];
+    assert_eq!(repo.purecode(&gate).status.code(), Some(0));
+    let mut strict = gate.to_vec();
+    strict.push("--no-config");
+    assert_eq!(repo.purecode(&strict).status.code(), Some(2));
+}
+
+#[test]
+fn source_hidden_as_binary_by_gitattributes_is_reported() {
+    let repo = Repo::new();
+    repo.write("a.py", b"x = 1\n");
+    repo.commit("base");
+    repo.git(&["branch", "base"]);
+    repo.write(".gitattributes", b"*.py -diff\n");
+    repo.write("a.py", b"x = 2\n");
+    repo.commit("hide");
+    let out = repo.purecode(&["diff", "--base", "base"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("a.py as binary"), "{stderr}");
+}

@@ -2,6 +2,13 @@ use crate::parser::BlobSource;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
+/// A git command that never runs a repository-configured fsmonitor hook.
+fn git() -> Command {
+    let mut cmd = Command::new("git");
+    cmd.args(["-c", "core.fsmonitor=false"]);
+    cmd
+}
+
 /// What to diff.
 pub enum DiffTarget<'a> {
     /// Changes on `head` since it diverged from `base` (`git diff base...head`).
@@ -14,7 +21,7 @@ pub enum DiffTarget<'a> {
 pub fn get_git_diff(target: DiffTarget) -> io::Result<Box<dyn BufRead>> {
     // Outside a repository `git diff` would fall back to `--no-index` and print its usage;
     // report git's own reason instead (not a repository, `safe.directory` ownership, ...).
-    let check = Command::new("git")
+    let check = git()
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()?;
     if !check.status.success() {
@@ -24,7 +31,7 @@ pub fn get_git_diff(target: DiffTarget) -> io::Result<Box<dyn BufRead>> {
         )));
     }
 
-    let mut cmd = Command::new("git");
+    let mut cmd = git();
     // `diff.relative` would limit and re-root paths; `--no-relative` needs git 2.28+.
     cmd.args(["-c", "diff.relative=false"]);
     cmd.args([
@@ -68,15 +75,20 @@ pub fn get_stdin_diff() -> Box<dyn BufRead> {
     Box::new(BufReader::new(io::stdin()))
 }
 
+/// Blobs above this size are not loaded (their lines are classified per hunk), so a crafted
+/// diff naming a huge file cannot exhaust memory.
+pub const MAX_BLOB_BYTES: usize = 4 << 20;
+
 /// Reads blobs from the current repository through one long-lived `git cat-file --batch`.
-/// Outside a repository (or for unknown ids) lookups return `None`.
+/// Outside a repository, for unknown ids or for blobs over [`MAX_BLOB_BYTES`], lookups return
+/// `None`.
 pub struct GitBlobs {
     process: Option<(Child, ChildStdin, BufReader<ChildStdout>)>,
 }
 
 impl GitBlobs {
     pub fn new() -> Self {
-        let process = Command::new("git")
+        let process = git()
             .args(["cat-file", "--batch"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -107,11 +119,16 @@ impl BlobSource for GitBlobs {
         let mut header = String::new();
         stdout.read_line(&mut header).ok()?;
         let mut parts = header.split_whitespace().skip(1);
-        let (kind, size) = (parts.next()?, parts.next()?.parse::<usize>().ok()?);
-        let mut content = vec![0; size + 1];
+        let (kind, size) = (parts.next()?, parts.next()?.parse::<u64>().ok()?);
+        if kind != "blob" || size > MAX_BLOB_BYTES as u64 {
+            // Skip the content (plus its trailing newline) to stay in sync for the next request.
+            io::copy(&mut stdout.by_ref().take(size + 1), &mut io::sink()).ok()?;
+            return None;
+        }
+        let mut content = vec![0; size as usize + 1];
         stdout.read_exact(&mut content).ok()?;
         content.pop();
-        (kind == "blob").then_some(content)
+        Some(content)
     }
 }
 

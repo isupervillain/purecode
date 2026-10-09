@@ -77,7 +77,15 @@ pub fn load_config() -> Result<(Config, PathBuf), String> {
         .take_while(|d| repo_root.is_some_and(|root| d.starts_with(root)));
     for dir in std::iter::once(cwd.as_path()).chain(search.skip(1)) {
         let path = dir.join(".purecode.toml");
-        if path.is_file() {
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        // A symlinked config could point at a secret outside the repository and have it
+        // echoed in a parse error.
+        if !meta.file_type().is_file() {
+            return Err(format!("{} must be a regular file", path.display()));
+        }
+        {
             let content = fs::read_to_string(&path)
                 .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
             let config =
@@ -90,7 +98,13 @@ pub fn load_config() -> Result<(Config, PathBuf), String> {
 
 /// Accepts keys at the top level or under a `[purecode]` table.
 fn parse_config(content: &str) -> Result<Config, String> {
-    let mut table: toml::Table = toml::from_str(content).map_err(|e| e.to_string())?;
+    // Only the message and line: the default rendering quotes the offending source text.
+    let mut table: toml::Table = toml::from_str(content).map_err(|e: toml::de::Error| {
+        let line = e
+            .span()
+            .map_or(0, |s| content[..s.start].matches('\n').count() + 1);
+        format!("{} (line {line})", e.message().trim())
+    })?;
     if table.len() == 1 {
         if let Some(toml::Value::Table(inner)) = table.remove("purecode") {
             table = inner;
@@ -98,7 +112,7 @@ fn parse_config(content: &str) -> Result<Config, String> {
     }
     let config: Config = toml::Value::Table(table)
         .try_into()
-        .map_err(|e: toml::de::Error| e.to_string())?;
+        .map_err(|e: toml::de::Error| e.message().trim().to_string())?;
     if !["human", "plain", "json"].contains(&config.format.as_str()) {
         return Err(format!(
             "format must be human, plain or json, got '{}'",
@@ -198,5 +212,9 @@ mod tests {
         assert!(parse_config("max_noise_ratio = 5.0").is_err());
         assert!(parse_config("max_noise_ratio = nan").is_err());
         assert!(parse_config("max_noise_ratio = -0.1").is_err());
+        // Errors name the problem and line, never the file's text.
+        let err = parse_config("GITHUB_TOKEN=ghs_SECRET123").unwrap_err();
+        assert!(!err.contains("ghs_SECRET123"), "{err}");
+        assert!(err.contains("line 1"), "{err}");
     }
 }

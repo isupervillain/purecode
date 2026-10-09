@@ -98,6 +98,10 @@ struct ReportArgs {
     /// CI mode (no colors, summary output)
     #[arg(long)]
     ci: bool,
+
+    /// Ignore .purecode.toml (for gates that must not be relaxed by the analyzed change)
+    #[arg(long)]
+    no_config: bool,
 }
 
 fn parse_ratio(s: &str) -> Result<f64, String> {
@@ -181,7 +185,15 @@ fn diff_stats(
 
 fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let (config, project_root) = config::load_config()?;
+    let no_config = match &cli.command {
+        Some(Commands::Diff { report, .. } | Commands::Files { report, .. }) => report.no_config,
+        None => cli.report.no_config,
+    };
+    let (config, project_root) = if no_config {
+        (Config::default(), std::env::current_dir()?)
+    } else {
+        config::load_config()?
+    };
     let filter = PathFilter::new(&config.include, &config.exclude)?;
 
     let (stats, mode, report_args) = match cli.command {
@@ -234,7 +246,8 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("{e}");
+            // Errors can quote config values and git output from an untrusted repository.
+            eprintln!("{}", report::printable(&e.to_string()));
             ExitCode::from(1)
         }
     }
